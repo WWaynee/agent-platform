@@ -1,0 +1,3 @@
+module agent-platform
+
+go 1.26.5
