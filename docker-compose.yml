@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: agent-mysql
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PWD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+    ports:
+      - "${MYSQL_PORT}:3306"
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    command: ["mysqld", "--default-authentication-plugin=mysql_native_password"]
+    restart: always
+
+  redis:
+    image: redis:7
+    container_name: agent-redis
+    env_file: .env
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - ./data/redis:/data
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    restart: always
+
+  minio:
+    image: minio/minio
+    container_name: agent-minio
+    env_file: .env
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - ./data/minio:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    command: server /data --console-address ":9001"
+    restart: always
+
+  milvus-lite:
+    image: milvusdb/milvus-lite:latest
+    container_name: agent-milvus
+    ports:
+      - "${MILVUS_PORT}:19530"
+    volumes:
+      - ./data/milvus:/var/lib/milvus
+    restart: always
