@@ -1,0 +1,29 @@
+# 环境变量、密钥（最重要，防止API密钥上传）
+.env
+.env.*
+!.env.example
+
+# Go 编译产物
+bin/
+*.exe
+*.out
+*.test
+
+# 日志文件
+*.log
+logs/
+
+# IDE 缓存与配置
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docker 本地持久化数据（容器挂载目录，不要提交）
+data/
+
+# 临时文件
+tmp/
+temp/
+*.tmp
