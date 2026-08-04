@@ -41,11 +41,22 @@ services:
     command: server /data --console-address ":9001"
     restart: always
 
-  milvus-lite:
-    image: milvusdb/milvus-lite:latest
-    container_name: agent-milvus
+  # milvus-lite:
+  #   image: milvusdb/milvus-lite:latest
+  #   container_name: agent-milvus
+  #   ports:
+  #     - "${MILVUS_PORT}:19530"
+  #   volumes:
+  #     - ./data/milvus:/var/lib/milvus
+  #   restart: always
+
+   # 新增向量库 Qdrant，替代无法docker部署的Milvus Lite
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: agent-qdrant
     ports:
-      - "${MILVUS_PORT}:19530"
+      - "6333:6333"
+      - "6334:6334"
     volumes:
-      - ./data/milvus:/var/lib/milvus
+      - ./data/qdrant:/qdrant/storage
     restart: always
