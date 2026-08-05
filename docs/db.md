@@ -28,6 +28,7 @@ CREATE TABLE `users` (
 CREATE TABLE `documents` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `tenant_id` bigint unsigned NOT NULL,
+  `user_id` bigint unsigned DEFAULT NULL COMMENT '上传者用户ID',
   `name` varchar(256) NOT NULL,
   `minio_object_key` varchar(512) NOT NULL,
   `status` varchar(32) NOT NULL COMMENT 'pending/processing/success/fail',
@@ -37,6 +38,7 @@ CREATE TABLE `documents` (
   `deleted_at` datetime(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_documents_tenant_id` (`tenant_id`),
+  KEY `idx_documents_user_id` (`user_id`),
   KEY `idx_documents_deleted_at` (`deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文档元数据表';
 

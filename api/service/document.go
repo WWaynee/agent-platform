@@ -37,13 +37,12 @@ func UploadDocument(tenantID, userID uint64, filename string, size int64, file i
 	// 3. 构造文档元数据并写入 document 表
 	doc := &model.Document{
 		TenantID:       tenantID,
+		UserID:         userID,    // 上传者（当前登录用户）
 		Name:           filename,  // 前端原始文件名，用于展示
 		MinioObjectKey: objectKey, // MinIO 内的唯一存储路径
 		Status:         "pending", // 待解析（后续 RAG 阶段处理）
 		Size:           size,      // 文件字节大小
 	}
-	// 注：userID 作为入参保留，但当前 document 表暂未记录"上传者"字段，
-	// 如需后续体现"谁上传的"，可给 document 表增加 user_id / uploaded_by 列
 	if err := storage.CreateDocument(doc); err != nil {
 		return nil, fmt.Errorf("写入文档记录失败: %w", err)
 	}

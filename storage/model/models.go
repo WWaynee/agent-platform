@@ -34,6 +34,7 @@ type User struct {
 type Document struct {
 	ID             uint64 `gorm:"primaryKey"`
 	TenantID       uint64 `gorm:"index;not null"`
+	UserID         uint64 `gorm:"index;comment:上传者用户ID"`
 	Name           string `gorm:"size:256;not null;comment:文档名称"`
 	MinioObjectKey string `gorm:"size:512;not null;comment:minio存储key"`
 	Status         string `gorm:"size:32;not null;comment:pending/processing/success/fail"`
