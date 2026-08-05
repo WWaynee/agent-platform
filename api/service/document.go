@@ -49,3 +49,10 @@ func UploadDocument(tenantID, userID uint64, filename string, size int64, file i
 
 	return doc, nil
 }
+
+// ListDocuments 分页查询文档列表
+// ⚠️ 强制按 tenant_id 过滤：只能查到当前租户的文档，绝不可跨租户
+// 返回文档切片、总条数
+func ListDocuments(tenantID uint64, page, pageSize int) ([]model.Document, int64, error) {
+	return storage.ListDocuments(tenantID, page, pageSize)
+}

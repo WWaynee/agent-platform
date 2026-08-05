@@ -79,3 +79,38 @@ func UploadDocument(c *gin.Context) {
 		"tenant_id": doc.TenantID,
 	})
 }
+
+// ============ 列表参数结构体 ============
+
+// ListDocumentsReq 文档分页列表请求（query 参数）
+type ListDocumentsReq struct {
+	Page     int `form:"page"`
+	PageSize int `form:"page_size"`
+}
+
+// ============ Handler 函数 ============
+
+// ListDocuments 文档分页列表
+// ⚠️ tenant_id 从 JWT 上下文拿，强制过滤，只能查当前租户的文档
+func ListDocuments(c *gin.Context) {
+	tenantID := middleware.GetTenantID(c)
+
+	var req ListDocumentsReq
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.BadRequest(c, "参数错误: "+err.Error())
+		return
+	}
+
+	list, total, err := service.ListDocuments(tenantID, req.Page, req.PageSize)
+	if err != nil {
+		response.ServerError(c, err.Error())
+		return
+	}
+
+	response.Success(c, gin.H{
+		"list":      list,
+		"total":     total,
+		"page":      req.Page,
+		"page_size": req.PageSize,
+	})
+}
