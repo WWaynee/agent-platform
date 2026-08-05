@@ -33,7 +33,12 @@ func main() {
 	}
 	log.Println("✅ Redis 连接成功")
 
-	// 4. 初始化 Gin 引擎（含全局中间件与路由）
+	// 4. 初始化 MinIO 连接（对象存储）
+	if err := storage.InitMinIO(); err != nil {
+		log.Fatalf("初始化 MinIO 失败: %v", err)
+	}
+
+	// 5. 初始化 Gin 引擎（含全局中间件与路由）
 	router := api.NewRouter()
 
 	// 5. 启动 HTTP 服务，监听配置里的端口
