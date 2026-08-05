@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 	"agent-platform/api/service"
 	"agent-platform/util"
@@ -76,5 +77,20 @@ func Login(c *gin.Context) {
 	response.Success(c, gin.H{
 		"token": token,
 		"user":  user,
+	})
+}
+
+// GetUserInfo 当前登录用户信息（测试接口，放在私有路由组）
+// 从 JWT 中间件注入的 Context 中读取 user_id / tenant_id / role 并返回
+func GetUserInfo(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	tenantID := middleware.GetTenantID(c)
+	role := middleware.GetRole(c)
+
+	// 正常情况下中间件已保证这些值存在；若为 0 说明上下文没注入（异常情况）
+	response.Success(c, gin.H{
+		"user_id":   userID,
+		"tenant_id": tenantID,
+		"role":      role,
 	})
 }

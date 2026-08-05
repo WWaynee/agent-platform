@@ -23,31 +23,29 @@ func NewRouter() *gin.Engine {
 		cors.Default(),        // 跨域
 	)
 
-	// 公开路由组（无需鉴权）
-	public := r.Group("")
+	// 公开路由组（无需登录，可直接访问）
+	public := r.Group("/api")
 	{
-		// 健康检查
-		public.GET("/health", handleHealth)
+		// 健康检查（无 /api 前缀，放根路径）
+		r.GET("/health", handleHealth)
+
+		// 用户注册 / 登录（未登录才能调用）
+		public.POST("/user/register", handler.Register) // 用户注册
+		public.POST("/user/login", handler.Login)       // 用户登录
 	}
 
-	// 业务路由组（租户/用户接口先放公开路由组，方便调试；接入 JWT 后再移到私有组）
-	business := r.Group("/api")
-	{
-		// 租户管理
-		business.POST("/tenant", handler.CreateTenant)                 // 创建租户
-		business.GET("/tenant/list", handler.ListTenants)              // 租户列表
-		business.GET("/tenant/:id", handler.GetTenantDetail)           // 租户详情
-		business.PUT("/tenant/:id/status", handler.UpdateTenantStatus) // 更新状态
-
-		// 用户注册 / 登录（放公开路由组：未登录才能调用，登录后不再需要）
-		business.POST("/user/register", handler.Register) // 用户注册
-		business.POST("/user/login", handler.Login)       // 用户登录
-	}
-
-	// 私有路由组占位（后续接入 JWT 鉴权）
+	// 私有路由组（挂 JWT 鉴权中间件，必须带有效 token 才能访问）
 	private := r.Group("/api")
+	private.Use(middleware.JWTAuth())
 	{
-		_ = private
+		// 测试接口：从 Context 拿当前登录用户信息
+		private.GET("/user/info", handler.GetUserInfo)
+
+		// 租户管理（创建/查询租户都需登录）
+		private.POST("/tenant", handler.CreateTenant)                 // 创建租户
+		private.GET("/tenant/list", handler.ListTenants)              // 租户列表
+		private.GET("/tenant/:id", handler.GetTenantDetail)           // 租户详情
+		private.PUT("/tenant/:id/status", handler.UpdateTenantStatus) // 更新状态
 	}
 
 	return r
