@@ -17,14 +17,8 @@ func main() {
 	cfg := config.GlobalConfig
 	log.Println("✅ 配置加载完成")
 
-	// 2. 初始化 MySQL 连接
-	if _, err := storage.InitMySQL(
-		cfg.MySQL.Host,
-		cfg.MySQL.Port,
-		cfg.MySQL.User,
-		cfg.MySQL.Password,
-		cfg.MySQL.DBName,
-	); err != nil {
+	// 2. 初始化 MySQL 连接（从 config 读取配置）
+	if err := storage.InitMySQL(); err != nil {
 		log.Fatalf("初始化 MySQL 失败: %v", err)
 	}
 	log.Println("✅ MySQL 连接成功")
