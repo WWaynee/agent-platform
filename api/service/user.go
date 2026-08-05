@@ -1,0 +1,70 @@
+package service
+
+import (
+	"errors"
+	"fmt"
+
+	"gorm.io/gorm"
+
+	"agent-platform/storage"
+	"agent-platform/storage/model"
+	"agent-platform/util"
+)
+
+// ============ Service 层：用户业务逻辑 ============
+
+// Register 用户注册
+// 流程：校验用户名是否已存在 → 密码 bcrypt 哈希 → 插入数据库 → 返回用户
+func Register(tenantID uint64, username, password, role string) (*model.User, error) {
+	// 1. 先查该租户下用户名是否已存在
+	_, err := storage.GetUserByUsername(tenantID, username)
+	if err == nil {
+		return nil, fmt.Errorf("用户名已存在")
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		// 不是"记录不存在"，是真实数据库错误
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+
+	// 2. 密码哈希
+	passwordHash, err := util.HashPassword(password)
+	if err != nil {
+		return nil, fmt.Errorf("密码加密失败: %w", err)
+	}
+
+	// 3. 构造用户并插入
+	user := &model.User{
+		TenantID:     tenantID,
+		Username:     username,
+		PasswordHash: passwordHash,
+		Role:         role,
+		Status:       1, // 默认启用
+	}
+	if err := storage.CreateUser(user); err != nil {
+		return nil, fmt.Errorf("创建用户失败: %w", err)
+	}
+
+	return user, nil
+}
+
+// Login 用户登录
+// 登录请求需携带 tenant_id + username + password
+// 无论用户不存在还是密码错误，统一返回"用户名或密码错误"（安全考虑，不让攻击者探测用户名是否有效）
+func Login(tenantID uint64, username, password string) (*model.User, error) {
+	// 1. 按租户 + 用户名查用户
+	user, err := storage.GetUserByUsername(tenantID, username)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("用户名或密码错误")
+		}
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+
+	// 2. 校验密码
+	if !util.VerifyPassword(password, user.PasswordHash) {
+		return nil, fmt.Errorf("用户名或密码错误")
+	}
+
+	// 3. 密码正确，返回用户
+	return user, nil
+}
