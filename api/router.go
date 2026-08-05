@@ -41,6 +41,9 @@ func NewRouter() *gin.Engine {
 		// 测试接口：从 Context 拿当前登录用户信息
 		private.GET("/user/info", handler.GetUserInfo)
 
+		// 文档上传（需登录，tenant_id 从 JWT 上下文拿）
+		private.POST("/document/upload", handler.UploadDocument)
+
 		// 租户管理（创建/查询租户都需登录）
 		private.POST("/tenant", handler.CreateTenant)                 // 创建租户
 		private.GET("/tenant/list", handler.ListTenants)              // 租户列表
