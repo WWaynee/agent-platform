@@ -6,6 +6,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
+	"agent-platform/api/handler"
 	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 )
@@ -29,11 +30,20 @@ func NewRouter() *gin.Engine {
 		public.GET("/health", handleHealth)
 	}
 
-	// 业务路由组
+	// 业务路由组（租户接口先放公开路由组，方便调试；接入 JWT 后再移到私有组）
 	business := r.Group("/api")
 	{
-		// 私有接口后续接 JWT 鉴权后放这里，当前先占位
-		_ = business
+		// 租户管理
+		business.POST("/tenant", handler.CreateTenant)                 // 创建租户
+		business.GET("/tenant/list", handler.ListTenants)              // 租户列表
+		business.GET("/tenant/:id", handler.GetTenantDetail)           // 租户详情
+		business.PUT("/tenant/:id/status", handler.UpdateTenantStatus) // 更新状态
+	}
+
+	// 私有路由组占位（后续接入 JWT 鉴权）
+	private := r.Group("/api")
+	{
+		_ = private
 	}
 
 	return r
