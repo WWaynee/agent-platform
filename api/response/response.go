@@ -9,11 +9,11 @@ import (
 // ============ 常用错误码常量 ============
 
 const (
-	CodeSuccess = 0      // 成功
-	CodeBadRequest  = 400 // 参数错误
+	CodeSuccess      = 0   // 成功
+	CodeBadRequest   = 400 // 参数错误
 	CodeUnauthorized = 401 // 未登录
-	CodeForbidden = 403 // 无权限
-	CodeServerError = 500 // 服务器内部错误
+	CodeForbidden    = 403 // 无权限
+	CodeServerError  = 500 // 服务器内部错误
 )
 
 // ============ 统一返回结构体 ============
