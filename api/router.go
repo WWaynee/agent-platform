@@ -30,7 +30,7 @@ func NewRouter() *gin.Engine {
 		public.GET("/health", handleHealth)
 	}
 
-	// 业务路由组（租户接口先放公开路由组，方便调试；接入 JWT 后再移到私有组）
+	// 业务路由组（租户/用户接口先放公开路由组，方便调试；接入 JWT 后再移到私有组）
 	business := r.Group("/api")
 	{
 		// 租户管理
@@ -38,6 +38,10 @@ func NewRouter() *gin.Engine {
 		business.GET("/tenant/list", handler.ListTenants)              // 租户列表
 		business.GET("/tenant/:id", handler.GetTenantDetail)           // 租户详情
 		business.PUT("/tenant/:id/status", handler.UpdateTenantStatus) // 更新状态
+
+		// 用户注册 / 登录（放公开路由组：未登录才能调用，登录后不再需要）
+		business.POST("/user/register", handler.Register) // 用户注册
+		business.POST("/user/login", handler.Login)       // 用户登录
 	}
 
 	// 私有路由组占位（后续接入 JWT 鉴权）
