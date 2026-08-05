@@ -16,35 +16,39 @@ func NewRouter() *gin.Engine {
 
 	// 全局中间件（顺序：Trace → Recovery → Logger → CORS）
 	r.Use(
-		middleware.Trace(),     // 生成 trace_id，注入 context
-		middleware.Recovery(),  // panic 恢复
-		middleware.Logger(),    // 请求日志
-		cors.Default(),         // 跨域
+		middleware.Trace(),    // 生成 trace_id，注入 context
+		middleware.Recovery(), // panic 恢复
+		middleware.Logger(),   // 请求日志
+		cors.Default(),        // 跨域
 	)
 
 	// 公开路由组（无需鉴权）
-	public := r.Group("/api")
+	public := r.Group("")
 	{
 		// 健康检查
 		public.GET("/health", handleHealth)
 	}
 
-	// 私有路由组（需 JWT 鉴权，后续阶段接入）
-	private := r.Group("/api")
-	// private.Use(middleware.Auth())  // 后续阶段接入
+	// 业务路由组
+	business := r.Group("/api")
 	{
-		_ = private // 占位，后续补充私有接口
+		// 私有接口后续接 JWT 鉴权后放这里，当前先占位
+		_ = business
 	}
 
 	return r
 }
 
+// AppVersion 服务版本号
+const AppVersion = "v0.0.1"
+
 // handleHealth 健康检查接口
-// 返回服务存活状态
+// 返回服务存活状态 + 当前时间 + 版本号
 func handleHealth(c *gin.Context) {
 	response.Success(c, gin.H{
-		"status": "ok",
-		"time":   nowStr(),
+		"status":  "running",
+		"time":    nowStr(),
+		"version": AppVersion,
 	})
 }
 
