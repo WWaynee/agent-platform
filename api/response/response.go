@@ -74,8 +74,9 @@ func BadRequest(c *gin.Context, message string) {
 }
 
 // Unauthorized 401 未登录
+// 鉴权失败是 HTTP 层面的问题，名字与行为一致：返回真正的 HTTP 401，前端拦截器据此跳转登录
 func Unauthorized(c *gin.Context, message string) {
-	Fail(c, CodeUnauthorized, message)
+	FailStatus(c, http.StatusUnauthorized, CodeUnauthorized, message)
 }
 
 // Forbidden 403 无权限
