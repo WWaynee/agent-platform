@@ -66,8 +66,8 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// 登录成功，签发 JWT
-	token, err := util.GenerateToken(user.ID, user.TenantID, user.Username, user.Role)
+	// 登录成功，签发 JWT（payload 只含 user_id / tenant_id / role）
+	token, err := util.GenerateToken(user.ID, user.TenantID, user.Role)
 	if err != nil {
 		response.ServerError(c, "生成 token 失败")
 		return
