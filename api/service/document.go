@@ -74,3 +74,29 @@ func GetDocumentDetail(tenantID, id uint64) (*model.Document, error) {
 	}
 	return doc, nil
 }
+
+// DeleteDocument 删除文档
+// 流程：确认文档属于当前租户 → 删 MinIO 文件 → 软删数据库记录
+// 只删 DB 记录而保留 MinIO 文件会造成孤儿文件、浪费存储，故两者一起删。
+func DeleteDocument(tenantID, id uint64) error {
+	// 1. 先查文档，确认存在且属于当前租户（带 tenant_id 过滤）
+	doc, err := storage.GetDocumentByID(tenantID, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("文档不存在")
+		}
+		return fmt.Errorf("查询文档失败: %w", err)
+	}
+
+	// 2. 删除 MinIO 里的实际文件
+	if err := storage.DeleteFile(doc.MinioObjectKey); err != nil {
+		return fmt.Errorf("删除 MinIO 文件失败: %w", err)
+	}
+
+	// 3. 软删数据库记录
+	if err := storage.DeleteDocument(tenantID, id); err != nil {
+		return fmt.Errorf("删除文档记录失败: %w", err)
+	}
+
+	return nil
+}

@@ -136,3 +136,23 @@ func GetDocumentDetail(c *gin.Context) {
 
 	response.Success(c, doc)
 }
+
+// DeleteDocument 删除文档
+// 路径参数：id
+// tenant_id 从 JWT 拿，强制过滤；先删 MinIO 文件再软删 DB 记录
+func DeleteDocument(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "无效的文档 ID")
+		return
+	}
+
+	tenantID := middleware.GetTenantID(c)
+	if err := service.DeleteDocument(tenantID, id); err != nil {
+		// 文档不存在/跨租户访问统一返回 400
+		response.BadRequest(c, err.Error())
+		return
+	}
+
+	response.Success(c, nil)
+}
