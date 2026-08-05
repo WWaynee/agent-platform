@@ -1,12 +1,15 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
 
 	"agent-platform/storage"
 	"agent-platform/storage/model"
+
+	"gorm.io/gorm"
 )
 
 // ============ Service 层：文档业务逻辑 ============
@@ -55,4 +58,19 @@ func UploadDocument(tenantID, userID uint64, filename string, size int64, file i
 // 返回文档切片、总条数
 func ListDocuments(tenantID uint64, page, pageSize int) ([]model.Document, int64, error) {
 	return storage.ListDocuments(tenantID, page, pageSize)
+}
+
+// GetDocumentDetail 查询单个文档详情
+// ⚠️ 强制按 tenant_id 过滤：查不到（无论是不存在还是不属于当前租户）统一返回"文档不存在"
+// 安全考虑：不区分"不存在"和"无权访问"，避免被探测是否存在别的租户的文档
+func GetDocumentDetail(tenantID, id uint64) (*model.Document, error) {
+	doc, err := storage.GetDocumentByID(tenantID, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// 不区分"文档不存在"与"跨租户访问"，统一报"文档不存在"
+			return nil, fmt.Errorf("文档不存在")
+		}
+		return nil, fmt.Errorf("查询文档失败: %w", err)
+	}
+	return doc, nil
 }

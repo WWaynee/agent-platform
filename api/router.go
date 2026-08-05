@@ -45,6 +45,8 @@ func NewRouter() *gin.Engine {
 		private.POST("/document/upload", handler.UploadDocument)
 		// 文档分页列表（需登录，强制 tenant_id 过滤）
 		private.GET("/document/list", handler.ListDocuments)
+		// 文档详情（需登录，强制 tenant_id 过滤）
+		private.GET("/document/:id", handler.GetDocumentDetail)
 
 		// 租户管理（创建/查询租户都需登录）
 		private.POST("/tenant", handler.CreateTenant)                 // 创建租户

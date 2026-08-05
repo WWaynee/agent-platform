@@ -2,6 +2,7 @@ package handler
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -113,4 +114,25 @@ func ListDocuments(c *gin.Context) {
 		"page":      req.Page,
 		"page_size": req.PageSize,
 	})
+}
+
+// GetDocumentDetail 文档详情
+// 路径参数：id
+// tenant_id 从 JWT 拿，强制过滤；跨租户/不存在统一返回"文档不存在"
+func GetDocumentDetail(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "无效的文档 ID")
+		return
+	}
+
+	tenantID := middleware.GetTenantID(c)
+	doc, err := service.GetDocumentDetail(tenantID, id)
+	if err != nil {
+		// 文档不存在/跨租户访问，统一返回 400（带出错提示）
+		response.BadRequest(c, err.Error())
+		return
+	}
+
+	response.Success(c, doc)
 }
