@@ -30,6 +30,7 @@ type MinIOConfig struct {
 	AccessKey string
 	SecretKey string
 	Bucket    string
+	UseSSL    bool // 本地开发 false，线上走 HTTPS 为 true
 }
 
 // Qdrant 配置
@@ -102,6 +103,7 @@ func Load() error {
 		AccessKey: getEnv("MINIO_ACCESS_KEY", "admin"),
 		SecretKey: getEnv("MINIO_SECRET_KEY", ""),
 		Bucket:    getEnv("MINIO_BUCKET", "document-store"),
+		UseSSL:    getEnvBool("MINIO_USE_SSL", false),
 	}
 
 	// Qdrant
@@ -170,4 +172,19 @@ func getEnvInt64(key string, defaultValue int64) int64 {
 		return defaultValue
 	}
 	return n
+}
+
+// getEnvBool 读取布尔型环境变量
+// 支持 true/1/yes/on 视为 true，其余（含空）视为 false
+func getEnvBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		fmt.Printf("[config] 环境变量 %s = %q 不是有效布尔值，使用默认值 %v\n", key, value, defaultValue)
+		return defaultValue
+	}
+	return b
 }
