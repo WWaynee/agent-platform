@@ -113,7 +113,7 @@
 - [ ] 结构化输出校验
 - [x] 测试：正常对话请求返回结果
 - [x] 测试：Embedding 调用返回向量（实测硅基流动，4096 维）
-- [ ] 测试：模拟超时，触发重试
+- [x] 测试：模拟超时，触发重试（单元测试：1ms 超时访问慢端点，快速失败不卡死）
 
 #### 📌 周四遇到的问题与解决方案
 
@@ -125,6 +125,10 @@
 
 3. **不同厂商 baseURL 是否带 `/v1` 前缀不一致**：DeepSeek baseURL 为 `https://api.deepseek.com`（不带 `/v1`，拼接 `/chat/completions` / `/embeddings` 即可用）；而硅基流动需要 `https://api.siliconflow.cn/v1`（带 `/v1`）才能命中端点。
    → 解决：baseURL 由配置按厂商各自指定（`.env` 中主 BaseURL=DeepSeek、EmbedBaseURL=硅基流动已分别配好），代码统一拼接 `/chat/completions` / `/embeddings`，互不影响。
+
+4. **超时 + 重试的组合陷阱（容错三件套·超时）**：最初 `http.Client.Timeout` 只管**单次请求**超时，一旦超时进入重试循环，会因为"整体无总预算"而反复超时重试 N 次，总耗时 = 超时×(重试次数+1)，在服务真实不稳定时会把请求无限拖住，违背"快速失败"目标。
+   → 解决（方案 B：超时 + 重试 + 整体 deadline 预算）：`doPost` 内为**整个重试循环**创建基于配置 `Timeout` 的 `context.WithTimeout`（若外部 ctx 未设 deadline）。每次请求都用该 ctx，退避等待也用 `select` 监听 ctx 取消；一旦总预算耗尽（deadline reached）立即返回 `请求超时` 错误并停止重试。可重试错误为网络错误 / HTTP 429 / 5xx；4xx（如 401）不重试。实测：`Timeout=1ms` 访问挂起 200ms 的慢端点，**仅耗时 1.3ms** 即返回超时错误且不崩溃（单元测试 `llmclient/client_test.go`）。
+   ⚠️ 注意点：重试只对**瞬时/服务端**错误有意义，超时必须受**整体时间预算**约束，否则超时在重试中会被无限放大；`http.Client.Timeout` 保留作为"单次请求兜底"，与整体 deadline 保持一致（都取配置 Timeout），二者无冲突。
 
 #### 周五・Agent 骨架搭建
 

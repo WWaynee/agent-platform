@@ -48,6 +48,8 @@ type LLMConfig struct {
 
 // NewClient 构造函数：接收业务层的 llm 配置与全局配置，返回 Client 接口。
 // 这里从 config.GlobalConfig.LLM 读取，并实例化带超时的 HTTP 客户端。
+// 注：超时控制采用「总预算 + 每轮 request context」策略，
+// 故 httpClient 不设固定 Timeout（统一由 doPost 里的 deadline 控制）。
 func NewClient(llm config.LLMConfig) Client {
 	return &OpenAIClient{
 		cfg: LLMConfig{
@@ -60,9 +62,7 @@ func NewClient(llm config.LLMConfig) Client {
 			Timeout:        time.Duration(llm.Timeout) * time.Second,
 			MaxRetries:     llm.MaxRetries,
 		},
-		httpClient: &http.Client{
-			Timeout: time.Duration(llm.Timeout) * time.Second,
-		},
+		httpClient: &http.Client{}, // 超时由 doPost 的 context deadline 控制
 	}
 }
 
@@ -207,22 +207,38 @@ func (c *OpenAIClient) embedEndpoint() (baseURL, apiKey string) {
 
 // doPost 发起带鉴权头的 POST 请求，返回响应体字节。
 // apiKey 可单独传入（对话/向量可各自使用不同厂商的 key）。
-// 带回退重试：遇到网络错误/5xx/限流时按退避策略重试。
+//
+// 容错策略（方案 B：超时 + 重试 + 整体 deadline 预算）：
+//  1. 整个请求过程（含所有重试）共享一个 deadline，总耗时不超过配置的 Timeout，
+//     deadline 到达后立即停止，即使重试次数未耗尽也不会再发起新请求（防死循环）。
+//  2. 可重试的错误：网络错误（连接失败/超时）、HTTP 429 限流、HTTP 5xx 服务端错误。
+//  3. 不可重试的错误：4xx（如 401 鉴权失败）为调用方错误，直接返回不重试。
+//  4. 重试间隙的退避等待会响应 ctx 取消 / deadline，到了立即中断。
 func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload []byte) ([]byte, error) {
+	// 若外部 ctx 未设截止时间，则基于配置的超时创建整体 deadline。
+	// 整个重试循环共享这个 ctx：时间预算耗尽即快速失败。
+	reqCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, c.cfg.Timeout)
+		defer cancel()
+	}
+
 	var lastErr error
 
 	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
+		// 退避等待 + 检查 deadline/取消（select 保证可被 ctx 打断）
 		if attempt > 0 {
-			// 退避等待 + 检查上下文取消（select 保证可被 ctx 打断）
 			delay := time.Duration(1<<uint(attempt-1)) * 250 * time.Millisecond
 			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
+			case <-reqCtx.Done():
+				// 总预算已耗尽，快速失败，不再重试
+				return nil, wrapDeadlineErr(reqCtx, lastErr)
 			case <-time.After(delay):
 			}
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("构造请求失败: %w", err)
 		}
@@ -231,8 +247,11 @@ func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload [
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			// 网络层错误（连接失败、超时等），可重试
+			// 网络层错误（连接失败、超时等），可重试；若已到总预算则快速失败
 			lastErr = fmt.Errorf("请求失败: %w", err)
+			if reqCtx.Err() != nil {
+				return nil, wrapDeadlineErr(reqCtx, lastErr)
+			}
 			continue
 		}
 
@@ -255,4 +274,12 @@ func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload [
 		}
 	}
 	return nil, lastErr
+}
+
+// wrapDeadlineErr 当总预算耗尽或外部 ctx 被取消时，返回清晰的错误信息。
+func wrapDeadlineErr(ctx context.Context, lastErr error) error {
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("请求超时（超过配置的截止时间）: %v", lastErr)
+	}
+	return ctx.Err()
 }
