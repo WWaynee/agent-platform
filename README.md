@@ -68,14 +68,19 @@
 
 #### 周三・文件上传 & 文档管理
 
-- [ ] 封装 MinIO SDK 工具类
-- [ ] 实现文件上传接口
-- [ ] 上传文件存入 MinIO
-- [ ] 文档元信息写入 document 表
-- [ ] 实现文档列表查询接口
-- [ ] 实现文档删除接口
-- [ ] 测试：上传文件，MinIO 有文件，DB 有记录
-- [ ] 测试：只能查当前租户的文档
+- [x] 封装 MinIO SDK 工具类（UploadFile / GetFileURL / DeleteFile）
+- [x] 初始化 MinIO 客户端（InitMinIO，检查/创建 bucket）
+- [x] 实现文件上传接口（POST /api/document/upload）
+- [x] 上传文件存入 MinIO（objectKey 带 tenant_id 前缀 + timestamp 防覆盖）
+- [x] 文档元信息写入 document 表（含 user_id 上传者，status 先置 pending）
+- [x] 实现文档列表查询接口（GET /api/document/list，分页）
+- [x] 实现文档详情接口（GET /api/document/:id）
+- [x] 实现文档删除接口（DELETE /api/document/:id，MinIO + DB 同步删）
+- [x] 测试：上传文件，MinIO 有文件，DB 有记录
+- [x] 测试：只能查当前租户的文档（多租户隔离）
+- [x] 测试：租户 B 看不到 / 删不掉租户 A 的文档
+- [x] 测试：所有文档接口不带 token 返回 401
+- [x] 测试：所有查询强制 tenant_id 过滤，无越权漏洞
 
 #### 周四・LLM 客户端封装
 
@@ -263,12 +268,11 @@ go run cmd/api/main.go
 |----|-------------|---------|
 | `GIN_MODE` | 默认 debug 模式（启动有告警）| 设 `GIN_MODE=release` |
 | CORS 跨域 | `cors.Default()` 允许 `*` 任意来源 | 限制为前端域名白名单 |
-| 租户接口鉴权 | 暂放**公开路由组**（无 token 可访问）| 接入 JWT 后**移入私有路由组**并强制鉴权 |
 | 日志输出 | `fmt.Printf` 直接打到 stdout | 接结构化日志 + 文件 / 采集（logrus/zap）|
 | 传输安全 | 直接暴露 `:8080` HTTP | 放 Nginx 反向代理 + HTTPS/SSL |
 | DSN 时区 | `loc=Local`（本地时区）| 生产统一为 `loc=UTC` 避免时区歧义 |
 
-> 其中「租户接口先放公开路由组」是**临时设计**：当前尚未实现登录鉴权，为方便调试先将接口放开。JWT 鉴权完成后会统一迁入私有路由组，届时此项自动消除。
+> 注：租户接口、文档接口等均已接入 JWT 并**移入私有路由组**强制鉴权，不再存在公开待办。
 
 ## 🔧 后续需补齐项（当前为快速开发 / 调试期留的口子）
 
