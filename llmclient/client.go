@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -32,6 +33,11 @@ type Client interface {
 type OpenAIClient struct {
 	cfg        LLMConfig    // 客户端配置（从 config.LLM 复制过来）
 	httpClient *http.Client // 复用连接的 HTTP 客户端
+
+	// 指数退避参数：默认 1s 起步、1s→2s→4s；加 20% 随机抖动避免雪崩。
+	// retryBase 仅供测试注入更小基数以快速验证；jitterRatio 为抖动比例（0.2 = 20%）。
+	retryBase   time.Duration
+	jitterRatio float64
 }
 
 // LLMConfig 客户端内部使用的配置（从全局 config 拷贝，避免后续全局改动影响已建实例）
@@ -63,6 +69,11 @@ func NewClient(llm config.LLMConfig) Client {
 			MaxRetries:     llm.MaxRetries,
 		},
 		httpClient: &http.Client{}, // 超时由 doPost 的 context deadline 控制
+
+		// 容错默认参数：退避基数 1s（1s→2s→4s）、20% 抖动。
+		// 注意：启动入口按秒配置超时，退避基数默认 1s；测试可覆盖为更小值以快速自测。
+		retryBase:   time.Second,
+		jitterRatio: 0.2,
 	}
 }
 
@@ -203,17 +214,94 @@ func (c *OpenAIClient) embedEndpoint() (baseURL, apiKey string) {
 	return baseURL, apiKey
 }
 
+// ============ 容错封装：错误分类 + 指数退避重试 ============
+
+// APIError 表示 LLM 接口返回的 HTTP 层错误，携带是否可重试的标记，
+// 供通用重试包装器 `withRetry` 决策。
+type APIError struct {
+	StatusCode int    // HTTP 状态码
+	Body       string // 响应体片段（便于排障）
+	Retryable  bool   // 是否可重试
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+// retryableErr 判断一个错误是否为可重试错误。
+// 可重试：网络错误（连接失败/超时）对应的 *APIError.Retryable==true、HTTP 5xx。
+// 注意：HTTP 429 限流当前返回 Retryable=false（方案A），但理论上是"可延迟重试"，
+// 后续可单独用 Retry-After / 慢退避接入（见 README 注意点）。
+func retryableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	ae, ok := err.(*APIError)
+	if !ok {
+		// 非 APIError（如 io 读取失败）视为可重试的瞬时错误
+		return true
+	}
+	return ae.Retryable
+}
+
+// withRetry 通用指数退避重试包装器（业务/客户端通用，后续熔断也可复用）。
+//
+// 参数：
+//   - fn:            一次真正的尝试。返回 nil 即成功；返回错误交由重试策略决定。
+//   - isRetryable:   判断某个错误是否可重试（不可重试则立即返回，不再退避）。
+//   - maxRetries:    最多重试次数（N 次重试 = 最多发起 N+1 次尝试）。
+//   - baseDelay:     退避基数，每隔 N 次重试前等待 baseDelay * 2^(N-1)，即 1s→2s→4s。
+//   - jitterRatio:   抖动比例（0~1），在退避间隔上叠加随机量，避免多客户端同时重试造成雪崩。
+//
+// 返回最后一次尝试的错误（重试耗尽时）；若中止/取消则返回 ctx 相关错误。
+func withRetry(ctx context.Context, fn func(attempt int) error, isRetryable func(err error) bool,
+	maxRetries int, baseDelay time.Duration, jitterRatio float64) error {
+
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// 上下文被取消时直接中断，不再发起新尝试
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("请求中断: %w", err)
+		}
+
+		lastErr = fn(attempt)
+
+		if lastErr == nil {
+			return nil // 成功
+		}
+
+		// 不可重试（调用方错误 / 限流策略 / 已到重试上限）→ 直接返回，不再退避
+		if !isRetryable(lastErr) || attempt >= maxRetries {
+			return lastErr
+		}
+
+		// 计算指数退避：1s → 2s → 4s（基数 baseDelay）
+		// 抖动：在 [1, 1+jitterRatio] 放大退避，随机错开并发重试
+		backoff := baseDelay * time.Duration(1<<uint(attempt))
+		jitter := 1 + (rand.Float64() * jitterRatio)
+		delay := time.Duration(float64(backoff) * jitter)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("请求中断: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+	}
+	return lastErr
+}
+
 // ============ HTTP 公共封装 ============
 
 // doPost 发起带鉴权头的 POST 请求，返回响应体字节。
 // apiKey 可单独传入（对话/向量可各自使用不同厂商的 key）。
 //
-// 容错策略（方案 B：超时 + 重试 + 整体 deadline 预算）：
-//  1. 整个请求过程（含所有重试）共享一个 deadline，总耗时不超过配置的 Timeout，
-//     deadline 到达后立即停止，即使重试次数未耗尽也不会再发起新请求（防死循环）。
-//  2. 可重试的错误：网络错误（连接失败/超时）、HTTP 429 限流、HTTP 5xx 服务端错误。
-//  3. 不可重试的错误：4xx（如 401 鉴权失败）为调用方错误，直接返回不重试。
-//  4. 重试间隙的退避等待会响应 ctx 取消 / deadline，到了立即中断。
+// 容错策略叠加：
+//  1. 超时控制（整体 deadline 预算）：若外部 ctx 未设截止时间，则为整个请求周期
+//     （含所有重试）创建基于配置 Timeout 的 context，总耗时不超过它，防死循环。
+//  2. 指数退避重试：1s→2s→4s + 20% 抖动，只对可重试错误重试。
+//  3. 可重试：网络错误、超时、HTTP 5xx。
+//  4. 不重试：HTTP 401/400/429 等（429 见 README 注意点，后续单独接入慢退避）。
 func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload []byte) ([]byte, error) {
 	// 若外部 ctx 未设截止时间，则基于配置的超时创建整体 deadline。
 	// 整个重试循环共享这个 ctx：时间预算耗尽即快速失败。
@@ -224,62 +312,53 @@ func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload [
 		defer cancel()
 	}
 
-	var lastErr error
+	var out []byte
 
-	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
-		// 退避等待 + 检查 deadline/取消（select 保证可被 ctx 打断）
-		if attempt > 0 {
-			delay := time.Duration(1<<uint(attempt-1)) * 250 * time.Millisecond
-			select {
-			case <-reqCtx.Done():
-				// 总预算已耗尽，快速失败，不再重试
-				return nil, wrapDeadlineErr(reqCtx, lastErr)
-			case <-time.After(delay):
+	err := withRetry(reqCtx,
+		func(attempt int) error {
+			req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(payload))
+			if err != nil {
+				return fmt.Errorf("构造请求失败: %w", err)
 			}
-		}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+apiKey) // 鉴权头
 
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(payload))
-		if err != nil {
-			return nil, fmt.Errorf("构造请求失败: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+apiKey) // 鉴权头
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			// 网络层错误（连接失败、超时等），可重试；若已到总预算则快速失败
-			lastErr = fmt.Errorf("请求失败: %w", err)
-			if reqCtx.Err() != nil {
-				return nil, wrapDeadlineErr(reqCtx, lastErr)
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				// 网络层错误（连接失败、超时等）→ 可重试
+				return &APIError{StatusCode: 0, Body: err.Error(), Retryable: true}
 			}
-			continue
-		}
+			defer resp.Body.Close()
 
-		respBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = fmt.Errorf("读取响应失败: %w", err)
-			continue
-		}
+			respBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return &APIError{StatusCode: resp.StatusCode, Body: "读取响应失败: " + err.Error(), Retryable: true}
+			}
 
-		// 2xx 直接返回
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return respBytes, nil
-		}
+			// 2xx 成功
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				out = respBytes
+				return nil
+			}
 
-		// 429 / 5xx 可重试；4xx（如 401）为调用方错误，不重试
-		lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBytes))
-		if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
-			return nil, lastErr
-		}
+			// 非 2xx：根据状态码标记是否可重试
+			//  - 5xx 服务器错误 → 可重试
+			//  - 429 限流 → 当前不重试（方案A；后续可接入 Retry-After 慢退避）
+			//  - 其余 4xx（401/400/404 等）→ 调用方错误，不重试
+			retryable := resp.StatusCode >= 500
+			return &APIError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBytes),
+				Retryable:  retryable,
+			}
+		},
+		retryableErr,
+		c.cfg.MaxRetries,
+		c.retryBase,
+		c.jitterRatio,
+	)
+	if err != nil {
+		return nil, err
 	}
-	return nil, lastErr
-}
-
-// wrapDeadlineErr 当总预算耗尽或外部 ctx 被取消时，返回清晰的错误信息。
-func wrapDeadlineErr(ctx context.Context, lastErr error) error {
-	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("请求超时（超过配置的截止时间）: %v", lastErr)
-	}
-	return ctx.Err()
+	return out, nil
 }
