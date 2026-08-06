@@ -47,11 +47,12 @@ type JWTConfig struct {
 
 // LLM 配置
 type LLMConfig struct {
-	APIKey   string // API Key
-	BaseURL  string // 基础地址
-	Model    string // 模型名称
-	Timeout  int    // 请求超时时间（秒）
-	MaxRetry int    // 最大重试次数
+	APIKey         string // API Key（OpenAI 兼容接口）
+	BaseURL        string // 基础地址
+	ChatModel      string // 对话模型名
+	EmbeddingModel string // 向量模型名
+	Timeout        int    // 请求超时时间（秒）
+	MaxRetries     int    // 最大重试次数
 }
 
 // 服务配置
@@ -120,11 +121,12 @@ func Load() error {
 
 	// LLM
 	cfg.LLM = LLMConfig{
-		APIKey:   getEnv("LLM_API_KEY", ""),
-		BaseURL:  getEnv("LLM_BASE_URL", "https://api.deepseek.com"),
-		Model:    getEnv("LLM_MODEL", "deepseek-chat"),
-		Timeout:  getEnvInt("LLM_TIMEOUT_SECONDS", 30),
-		MaxRetry: getEnvInt("LLM_MAX_RETRY", 3),
+		APIKey:         getEnv("LLM_API_KEY", ""),
+		BaseURL:        getEnv("LLM_BASE_URL", "https://api.deepseek.com"),
+		ChatModel:      getEnv("LLM_CHAT_MODEL", "deepseek-chat"),
+		EmbeddingModel: getEnv("LLM_EMBEDDING_MODEL", "text-embedding-v1"),
+		Timeout:        getEnvInt("LLM_TIMEOUT_SECONDS", 30),
+		MaxRetries:     getEnvInt("LLM_MAX_RETRY", 3),
 	}
 
 	// Server
