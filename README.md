@@ -104,16 +104,27 @@
 
 #### 周四・LLM 客户端封装
 
-- [ ] 封装 LLM HTTP 请求客户端
-- [ ] 实现 Chat 对话接口调用
-- [ ] 实现 Embedding 向量生成接口
-- [ ] 超时控制
-- [ ] 指数退避重试机制
+- [x] 封装 LLM HTTP 请求客户端
+- [x] 实现 Chat 对话接口调用
+- [x] 实现 Embedding 向量生成接口
+- [x] 超时控制
+- [x] 指数退避重试机制
 - [ ] 简易熔断器
 - [ ] 结构化输出校验
-- [ ] 测试：正常对话请求返回结果
-- [ ] 测试：Embedding 调用返回向量
+- [x] 测试：正常对话请求返回结果
+- [x] 测试：Embedding 调用返回向量（实测硅基流动，4096 维）
 - [ ] 测试：模拟超时，触发重试
+
+#### 📌 周四遇到的问题与解决方案
+
+1. **DeepSeek 不提供可用的 Embedding 接口**：周四要调 Embedding 生成向量，但实测 `api.deepseek.com/v1/embeddings` 返回 404（DeepSeek 官方目前未开放 embedding 能力），且 `.env` 里原配的模型 `text-embedding-v1` 在 DeepSeek 上也不存在。
+   → 解决：改用**硅基流动（SiliconFlow）**作为向量服务——`https://api.siliconflow.cn/v1/embeddings` + `Qwen/Qwen3-VL-Embedding-8B`，实测返回 4096 维向量，token 用量正常。
+
+2. **Chat 与 Embedding 分属不同厂商（两套 key + 域名）**：对话走 DeepSeek（`sk-a628...` / `api.deepseek.com`），向量走硅基流动（`sk-alpwy...` / `api.siliconflow.cn`），两个厂商 key 不同、域名不同，而 llmclient 原本 Chat/Embedding 共享同一套 BaseURL+APIKey。
+   → 解决：给 `LLMConfig` 新增**可选**的 `EmbedAPIKey` / `EmbedBaseURL`（读取 `LLM_EMBED_API_KEY` / `LLM_EMBED_BASE_URL`），`Embed()` 通过 `embedEndpoint()` **优先用独立向量配置、留空则自动回退主配置**。这样既支持多厂商（DeepSeek 对话 + 硅基流动向量），又向后兼容"单一厂商全包"场景，业务代码零改动。
+
+3. **不同厂商 baseURL 是否带 `/v1` 前缀不一致**：DeepSeek baseURL 为 `https://api.deepseek.com`（不带 `/v1`，拼接 `/chat/completions` / `/embeddings` 即可用）；而硅基流动需要 `https://api.siliconflow.cn/v1`（带 `/v1`）才能命中端点。
+   → 解决：baseURL 由配置按厂商各自指定（`.env` 中主 BaseURL=DeepSeek、EmbedBaseURL=硅基流动已分别配好），代码统一拼接 `/chat/completions` / `/embeddings`，互不影响。
 
 #### 周五・Agent 骨架搭建
 
@@ -234,7 +245,7 @@
 | 向量库 | Qdrant |
 | 消息队列 | RabbitMQ |
 | 监控 | Prometheus |
-| 大模型 | DeepSeek / OpenAI 兼容接口 |
+| 大模型 | DeepSeek 对话（OpenAI 兼容）；向量走硅基流动（SiliconFlow）|
 | 部署 | Docker Compose |
 
 ## 🚀 快速启动

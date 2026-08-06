@@ -47,12 +47,19 @@ type JWTConfig struct {
 
 // LLM 配置
 type LLMConfig struct {
-	APIKey         string // API Key（OpenAI 兼容接口）
-	BaseURL        string // 基础地址
+	APIKey         string // API Key（OpenAI 兼容接口，对话用）
+	BaseURL        string // 基础地址（对话用）
 	ChatModel      string // 对话模型名
 	EmbeddingModel string // 向量模型名
-	Timeout        int    // 请求超时时间（秒）
-	MaxRetries     int    // 最大重试次数
+
+	// 独立向量服务配置（可选）。
+	// 若为空则自动回退用上方 APIKey/BaseURL（即对话、向量同厂商）。
+	// 设置后可让 Chat 与 Embedding 使用不同厂商（如 DeepSeek 对话 + 硅基流动向量）。
+	EmbedAPIKey  string // 向量服务 API Key
+	EmbedBaseURL string // 向量服务基础地址
+
+	Timeout    int // 请求超时时间（秒）
+	MaxRetries int // 最大重试次数
 }
 
 // 服务配置
@@ -125,8 +132,11 @@ func Load() error {
 		BaseURL:        getEnv("LLM_BASE_URL", "https://api.deepseek.com"),
 		ChatModel:      getEnv("LLM_CHAT_MODEL", "deepseek-chat"),
 		EmbeddingModel: getEnv("LLM_EMBEDDING_MODEL", "text-embedding-v1"),
-		Timeout:        getEnvInt("LLM_TIMEOUT_SECONDS", 30),
-		MaxRetries:     getEnvInt("LLM_MAX_RETRY", 3),
+		// 可选：独立向量服务（不填则回退用上面的 deepseek）
+		EmbedAPIKey:  getEnv("LLM_EMBED_API_KEY", ""),
+		EmbedBaseURL: getEnv("LLM_EMBED_BASE_URL", ""),
+		Timeout:      getEnvInt("LLM_TIMEOUT_SECONDS", 30),
+		MaxRetries:   getEnvInt("LLM_MAX_RETRY", 3),
 	}
 
 	// Server

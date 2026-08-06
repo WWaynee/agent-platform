@@ -40,6 +40,8 @@ type LLMConfig struct {
 	BaseURL        string
 	ChatModel      string
 	EmbeddingModel string
+	EmbedAPIKey    string // 向量服务独立 key（为空回退用 APIKey）
+	EmbedBaseURL   string // 向量服务独立地址（为空回退用 BaseURL）
 	Timeout        time.Duration
 	MaxRetries     int
 }
@@ -53,6 +55,8 @@ func NewClient(llm config.LLMConfig) Client {
 			BaseURL:        llm.BaseURL,
 			ChatModel:      llm.ChatModel,
 			EmbeddingModel: llm.EmbeddingModel,
+			EmbedAPIKey:    llm.EmbedAPIKey,
+			EmbedBaseURL:   llm.EmbedBaseURL,
 			Timeout:        time.Duration(llm.Timeout) * time.Second,
 			MaxRetries:     llm.MaxRetries,
 		},
@@ -103,9 +107,9 @@ func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	// 发起 POST 请求
+	// 发起 POST 请求（对话使用主配置的 baseURL + apiKey）
 	url := c.cfg.BaseURL + "/chat/completions"
-	respBytes, err := c.doPost(ctx, url, payload)
+	respBytes, err := c.doPost(ctx, url, c.cfg.APIKey, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -159,8 +163,10 @@ func (c *OpenAIClient) Embed(ctx context.Context, req EmbeddingRequest) (*Embedd
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	url := c.cfg.BaseURL + "/embeddings"
-	respBytes, err := c.doPost(ctx, url, payload)
+	// 向量服务可独立配置：优先用 EmbedBaseURL/EmbedAPIKey，为空则回退用主配置
+	baseURL, apiKey := c.embedEndpoint()
+	url := baseURL + "/embeddings"
+	respBytes, err := c.doPost(ctx, url, apiKey, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -183,11 +189,26 @@ func (c *OpenAIClient) Embed(ctx context.Context, req EmbeddingRequest) (*Embedd
 	}, nil
 }
 
+// embedEndpoint 返回向量服务使用的 BaseURL 与 APIKey。
+// 若配置了独立的 EmbedBaseURL/EmbedAPIKey 则用之（实现多厂商），否则回退用主配置（单厂商）。
+func (c *OpenAIClient) embedEndpoint() (baseURL, apiKey string) {
+	baseURL = c.cfg.EmbedBaseURL
+	apiKey = c.cfg.EmbedAPIKey
+	if baseURL == "" {
+		baseURL = c.cfg.BaseURL
+	}
+	if apiKey == "" {
+		apiKey = c.cfg.APIKey
+	}
+	return baseURL, apiKey
+}
+
 // ============ HTTP 公共封装 ============
 
 // doPost 发起带鉴权头的 POST 请求，返回响应体字节。
+// apiKey 可单独传入（对话/向量可各自使用不同厂商的 key）。
 // 带回退重试：遇到网络错误/5xx/限流时按退避策略重试。
-func (c *OpenAIClient) doPost(ctx context.Context, url string, payload []byte) ([]byte, error) {
+func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload []byte) ([]byte, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
@@ -206,7 +227,7 @@ func (c *OpenAIClient) doPost(ctx context.Context, url string, payload []byte) (
 			return nil, fmt.Errorf("构造请求失败: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey) // 鉴权头
+		req.Header.Set("Authorization", "Bearer "+apiKey) // 鉴权头
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
