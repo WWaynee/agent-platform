@@ -274,6 +274,87 @@ go run cmd/api/main.go
 - **分层记忆**：Redis 短期会话记忆 + 超长上下文自动摘要
 - **全链路可观测**：TraceID 贯穿，指标埋点完善
 
+## 📁 项目目录结构
+
+> 说明：
+> - `data/` 为 Docker 容器挂载的本地持久化数据（MySQL/MinIO/Qdrant/Redis），仅运行时生成，已在 `.gitignore` 排除**不入库**。
+> - `.gitkeep` 为预留空包的占位文件，对应开发计划中尚未开工的模块。
+
+```text
+agent-platform/
+├── README.md                  # 项目说明：计划 / 完成进度 / 结构 / 待办
+├── .env.example               # 环境变量模板（cp 成 .env 后填入真实值）
+├── .gitignore                 # 忽略 .env / data / bin / 日志 / IDE 配置等
+├── go.mod / go.sum            # Go 模块依赖声明与锁定
+├── docker-compose.yml         # 一键拉起 MySQL / Redis / MinIO / Qdrant / RabbitMQ
+│
+├── cmd/                       # 可执行程序入口（各独立 main）
+│   ├── api/                   #   主服务入口：加载配置 → 连 MySQL/Redis/MinIO → 启动 Gin
+│   ├── migrate/               #   数据库迁移工具（建表 / 加列 / 建索引）
+│   ├── configtest/            #   配置自检工具（未配置输出调试日志，仅本地用）
+│   ├── llm-demo/              #   llmclient 演示：go run ./cmd/llm-demo chat|embed
+│   └── llm-selfcheck/         #   llmclient 自测：Chat/Embedding/token 全通过返回 ✅
+│
+├── config/
+│   └── config.go              # 全局配置：读取 .env，注入 MySQL/Redis/MinIO/Qdrant/JWT/LLM/Server
+│
+├── api/                       # HTTP 接口层（Gin）
+│   ├── router.go              #   路由注册：公开组（health/注册/登录）与私有组（JWT 鉴权）
+│   ├── handler/               #   处理器：tenant.go / user.go / document.go（绑定参数、调 service）
+│   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
+│   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / context
+│   ├── response/              #   统一返回格式与错误码工具
+│   └── .gitkeep
+│
+├── storage/                   # 数据持久化层
+│   ├── init.go                #   Redis 客户端初始化
+│   ├── mysql.go               #   MySQL 初始化（GORM）
+│   ├── minio.go               #   MinIO SDK 封装 + 初始化：Upload/GetURL/Delete
+│   ├── model/models.go        #   GORM 模型（7 张核心表的实体定义）
+│   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
+│   └── document.go            #   文档元信息的数据库操作
+│
+├── llmclient/                 # 大模型客户端（OpenAI 兼容接口）
+│   ├── types.go               #   统一数据结构：Chat/Embedding 请求响应、角色、token 用量
+│   └── client.go              #   Client 接口 + OpenAIClient 实现：超时/退避重试/多厂商
+│
+├── util/                      # 通用工具
+│   ├── jwt.go                 #   JWT 生成与解析（载荷最小化：user_id/tenant_id/role）
+│   └── password.go            #   密码 bcrypt 哈希与校验
+│
+├── docs/
+│   └── db.md                  # 7 张核心数据表设计文档（字段 / 索引 / 关系）
+│
+├── agent/                     # （预留）自研 Agent 引擎（ReAct 骨架，周五）
+│   └── .gitkeep
+├── mq/                        # （预留）消息队列封装（异步任务，第二周周一）
+│   └── .gitkeep
+├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
+│   └── .gitkeep
+├── toolkit/                   # （预留）可插拔工具集（Agent 调用能力注入）
+│   └── .gitkeep
+├── observability/             # （预留）可观测体系（TraceID / 指标 / 审计，第二周周四）
+│   └── .gitkeep
+│
+└── data/                      # ⛔ 运行时数据，gitignore 排除不入库（本地 Docker 持久化）
+    ├── mysql/                 #   MySQL 数据文件
+    ├── redis/                 #   Redis dump 文件
+    ├── minio/                 #   MinIO 对象文件
+    └── qdrant/                #   Qdrant 向量数据
+```
+
+### 分层依赖关系
+
+```text
+cmd/(api...)  →  api/(handler → service)  →  storage/(MySQL/MinIO/Redis)
+                          ↘  ↓                ↘  config/(全局配置)
+                     llmclient/(Chat/Embedding)   ↑
+                          ↘  ↓                ┌── util/(JWT/密码)
+                     agent/ · toolkit/ · mq/  └── 未来 RAG：Qdrant
+```
+
+> 核心原则：**业务层只依赖 `llmclient.Client` 接口与 `storage` 层**，不直接触碰厂商 SDK / DB 细节，便于换厂商、换存储。
+
 ## ⚠️ 上线前需调整 / 调试期产物清单
 
 以下为**当前开发调试阶段**留下的内容，部署到线上环境前必须处理，否则存在安全或稳定性风险。
