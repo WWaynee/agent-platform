@@ -2,6 +2,7 @@ package llmclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,14 @@ func newTestClient(baseURL string, timeout time.Duration, maxRetries int) *OpenA
 			// 单次请求兜底超时
 			Timeout: timeout,
 		},
+		retryBase:   time.Second,
+		jitterRatio: 0.2,
+		cb: NewCircuitBreaker(CircuitBreakerConfig{
+			FailureThreshold: 0.5,
+			MinRequests:      5,
+			Window:           10 * time.Second,
+			OpenTimeout:      30 * time.Second,
+		}),
 	}
 }
 
@@ -172,4 +181,213 @@ func TestChat_Retry_TimeoutThenRecover(t *testing.T) {
 		t.Fatalf("期望重试后拿到恢复的响应，实际 content=%+v", resp)
 	}
 	t.Logf("✅ 超时会重试并最终恢复: 请求次数=%d, content=%q", count.Load(), resp.Content)
+}
+
+// ---------------------- 简易熔断器自测 ----------------------
+
+// fakeClock 手动推进的假时钟，用于让熔断状态机在毫秒级完成全流转验证。
+type fakeClock struct{ t time.Time }
+
+func (f *fakeClock) now() time.Time          { return f.t }
+func (f *fakeClock) advance(d time.Duration) { f.t = f.t.Add(d) }
+
+// newCbWithClock 构造一个注入假时钟、最小评估参数（2次请求即评估）的熔断器。
+func newCbWithClock() (*CircuitBreaker, *fakeClock) {
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	cb := NewCircuitBreaker(CircuitBreakerConfig{
+		FailureThreshold: 0.5,
+		MinRequests:      2,
+		Window:           10 * time.Second,
+		OpenTimeout:      30 * time.Second,
+	})
+	cb.nowFunc = clk.now
+	return cb, clk
+}
+
+// TestCb_OpenOnFailure 自测点：连续失败达到门槛 → 熔断器打开（Open）。
+func TestCb_OpenOnFailure(t *testing.T) {
+	cb, _ := newCbWithClock()
+
+	// 2 次请求，全失败（失败率 100% > 50%）→ 打开
+	cb.allow()
+	cb.record(false)
+	cb.allow()
+	cb.record(false)
+
+	if got := cb.State(); got != StateOpen {
+		t.Fatalf("连续失败后应 Open，实际 %v", got)
+	}
+	// Open 后 allow 应拒绝（不发请求）
+	if cb.allow() {
+		t.Fatal("Open 状态仍放行请求，应直接拒绝")
+	}
+	t.Log("✅ 连续失败触发熔断打开，Open 下拒绝请求")
+}
+
+// TestCb_OpenToHalfOpen 自测点：熔断持续 openTimeout 后 → 进入半开，放一个试探请求。
+func TestCb_OpenToHalfOpen(t *testing.T) {
+	cb, clk := newCbWithClock()
+
+	cb.allow()
+	cb.record(false)
+	cb.allow()
+	cb.record(false) // 打开
+	if cb.State() != StateOpen {
+		t.Fatal("前置步骤应已 Open")
+	}
+
+	// 推进 30s（>= OpenTimeout）→ 半开
+	clk.advance(30 * time.Second)
+	if got := cb.State(); got != StateHalfOpen {
+		t.Fatalf("熔断超时后应 Half-Open，实际 %v", got)
+	}
+
+	// 半开放第一个试探请求；第二个应被拒绝
+	if !cb.allow() {
+		t.Fatal("半开应放第一个试探请求")
+	}
+	if cb.allow() {
+		t.Fatal("半开下第二个请求应被拒绝（只放一个试探）")
+	}
+	t.Log("✅ 熔断超时进入半开，仅放行一个试探请求")
+}
+
+// TestCb_HalfOpenSuccess_Close 自测点：半开试探成功后 → 回到 Closed。
+func TestCb_HalfOpenSuccess_Close(t *testing.T) {
+	cb, clk := newCbWithClock()
+
+	cb.allow()
+	cb.record(false)
+	cb.allow()
+	cb.record(false)
+	clk.advance(30 * time.Second) // → Half-Open
+
+	cb.allow()      // 放试探
+	cb.record(true) // 试探成功
+	if got := cb.State(); got != StateClosed {
+		t.Fatalf("半开试探成功应回 Closed，实际 %v", got)
+	}
+	if !cb.allow() {
+		t.Fatal("回 Closed 后应正常放行请求")
+	}
+	t.Log("✅ 半开试探成功 → 熔断关闭，恢复正常")
+}
+
+// TestCb_HalfOpenFail_StayOpen 自测点：半开试探失败后 → 继续 Open。
+func TestCb_HalfOpenFail_StayOpen(t *testing.T) {
+	cb, clk := newCbWithClock()
+
+	cb.allow()
+	cb.record(false)
+	cb.allow()
+	cb.record(false)
+	clk.advance(30 * time.Second) // → Half-Open
+
+	cb.allow()       // 放试探
+	cb.record(false) // 试探失败
+	if got := cb.State(); got != StateOpen {
+		t.Fatalf("半开试探失败应回 Open，实际 %v", got)
+	}
+	if cb.allow() {
+		t.Fatal("回 Open 后又放行，应继续拒绝")
+	}
+	t.Log("✅ 半开试探失败 → 继续熔断打开")
+}
+
+// ---------------------- 熔断器集成自测（业务无感知） ----------------------
+
+// TestChat_CircuitBreaker_OpenNoHTTP 自测点：熔断打开后，调用 Chat
+// 直接返回熔断错误且【不发 HTTP 请求】（保护下游），业务层无感知。
+func TestChat_CircuitBreaker_OpenNoHTTP(t *testing.T) {
+	var count atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count.Add(1)
+		http.Error(w, "boom", http.StatusInternalServerError) // 持续 500
+	}))
+	defer srv.Close()
+
+	client := newRetryTestClient(srv.URL, 0) // maxRetries=0，每次 Chat=1 次请求，计数可预期
+	// 注入小参数熔断器：2 次请求即评估，失败率 50% 触发
+	client.cb = NewCircuitBreaker(CircuitBreakerConfig{
+		FailureThreshold: 0.5,
+		MinRequests:      2,
+		Window:           10 * time.Second,
+		OpenTimeout:      30 * time.Second,
+	})
+
+	req := func() {
+		_, _ = client.Chat(context.Background(), ChatRequest{
+			Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}},
+		})
+	}
+
+	// 2 次失败 → 打开熔断
+	req()
+	req()
+	if got := client.cb.State(); got != StateOpen {
+		t.Fatalf("连续失败后应 Open，实际 %v", got)
+	}
+	httpCountAfterOpen := count.Load()
+
+	// Open 后再调用：应返回熔断错误且不再发 HTTP
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}},
+	})
+	if err == nil || !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("Open 下应返回熔断错误，实际 err=%v", err)
+	}
+	if got := count.Load(); got != httpCountAfterOpen {
+		t.Fatalf("Open 下不应再发 HTTP 请求，原 %d 现 %d", httpCountAfterOpen, got)
+	}
+	t.Logf("✅ 熔断打开后快速失败：HTTP 请求数保持 %d，返回 %v", count.Load(), err)
+}
+
+// TestChat_CircuitBreaker_Recover 自测点：熔断半开后试探成功 → 恢复正常（业务无感知切换）。
+func TestChat_CircuitBreaker_Recover(t *testing.T) {
+	var count atomic.Int32
+	var failUntil atomic.Int32 // 前 N 次返回 500，之后返回成功
+	failUntil.Store(2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := count.Add(1)
+		if int32(n) <= failUntil.Load() {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	client := newRetryTestClient(srv.URL, 0)
+	client.cb = NewCircuitBreaker(CircuitBreakerConfig{
+		FailureThreshold: 0.5,
+		MinRequests:      2,
+		Window:           time.Second,
+		OpenTimeout:      50 * time.Millisecond, // 快速半开
+	})
+
+	// 2 次失败 → Open
+	for i := 0; i < 2; i++ {
+		_, _ = client.Chat(context.Background(), ChatRequest{
+			Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}},
+		})
+	}
+	if client.cb.State() != StateOpen {
+		t.Fatal("前置步骤应已 Open")
+	}
+
+	// 等待超过 openTimeout → 半开放试探；此时服务已恢复 → 试探成功回 Closed
+	time.Sleep(80 * time.Millisecond)
+	resp, err := client.Chat(context.Background(), ChatRequest{
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("半开试探应成功恢复，实际 err=%v", err)
+	}
+	if client.cb.State() != StateClosed {
+		t.Fatalf("半开试探成功应回 Closed，实际 %v", client.cb.State())
+	}
+	if resp == nil || resp.Content != "ok" {
+		t.Fatalf("应拿到恢复的响应，实际 content=%+v", resp)
+	}
+	t.Logf("✅ 熔断半开试探成功 → 自动恢复 closed，业务无感知")
 }

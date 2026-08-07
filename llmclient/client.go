@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"sync"
 	"time"
 
 	"agent-platform/config"
@@ -38,6 +40,9 @@ type OpenAIClient struct {
 	// retryBase 仅供测试注入更小基数以快速验证；jitterRatio 为抖动比例（0.2 = 20%）。
 	retryBase   time.Duration
 	jitterRatio float64
+
+	// cb 简易熔断器：Closed →（失败率超阈值）→ Open →（超时后）→ Half-Open →（试探）→ 回 Closed/Open。
+	cb *CircuitBreaker
 }
 
 // LLMConfig 客户端内部使用的配置（从全局 config 拷贝，避免后续全局改动影响已建实例）
@@ -74,6 +79,14 @@ func NewClient(llm config.LLMConfig) Client {
 		// 注意：启动入口按秒配置超时，退避基数默认 1s；测试可覆盖为更小值以快速自测。
 		retryBase:   time.Second,
 		jitterRatio: 0.2,
+
+		// 熔断器：窗口 10s / 最少 5 次请求评估 / 失败率 50% 触发 / 熔断持续 30s
+		cb: newCircuitBreaker(CircuitBreakerConfig{
+			FailureThreshold: 0.5,
+			MinRequests:      5,
+			Window:           10 * time.Second,
+			OpenTimeout:      30 * time.Second,
+		}),
 	}
 }
 
@@ -236,6 +249,10 @@ func retryableErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	// 熔断错误：熔断期间不发请求、也不重试（避免打垮已故障的下游）
+	if errors.Is(err, ErrCircuitOpen) {
+		return false
+	}
 	ae, ok := err.(*APIError)
 	if !ok {
 		// 非 APIError（如 io 读取失败）视为可重试的瞬时错误
@@ -291,6 +308,196 @@ func withRetry(ctx context.Context, fn func(attempt int) error, isRetryable func
 	return lastErr
 }
 
+// ============ 简易熔断器（Closed / Open / Half-Open） ============
+
+// ErrCircuitOpen 表示熔断器处于 Open 状态，请求被快速拒绝，未发起 HTTP 请求。
+var ErrCircuitOpen = fmt.Errorf("熔断器已打开（circuit open）: LLM 服务疑似不可用，已快速失败")
+
+// CircuitBreakerState 熔断器状态
+type CircuitBreakerState int
+
+const (
+	// StateClosed 关闭：正常状态，请求全部放行
+	StateClosed CircuitBreakerState = iota
+	// StateOpen 打开：所有请求直接拒绝，不发 HTTP
+	StateOpen
+	// StateHalfOpen 半开：放少量试探请求，探测服务是否恢复
+	StateHalfOpen
+)
+
+func (s CircuitBreakerState) String() string {
+	switch s {
+	case StateClosed:
+		return "closed"
+	case StateOpen:
+		return "open"
+	case StateHalfOpen:
+		return "half-open"
+	}
+	return "unknown"
+}
+
+// CircuitBreakerConfig 熔断器参数配置。默认值见 NewCircuitBreaker 内。
+type CircuitBreakerConfig struct {
+	FailureThreshold float64       // 失败率阈值（0~1），超过则打开熔断，如 0.5
+	MinRequests      int           // 触发评估的最少请求数，低于此值不评估（防冷启动误判）
+	Window           time.Duration // 统计时间窗口，如 10s
+	OpenTimeout      time.Duration // 熔断持续时长，超过后进入半开试探，如 30s
+}
+
+// CircuitBreaker 简易熔断器：用"简单计数器 + 时间窗口"实现，无滑动窗口。
+// 并发安全：所有方法加互斥锁。
+type CircuitBreaker struct {
+	failureThreshold float64
+	minRequests      int
+	window           time.Duration
+	openTimeout      time.Duration
+
+	mu sync.Mutex
+
+	state        CircuitBreakerState
+	requestCount int // 窗口内请求总数
+	failureCount int // 窗口内失败数
+	windowStart  time.Time
+
+	openSince         time.Time // Open 起始时刻（用于切换到 Half-Open）
+	halfOpenProbeSent bool      // Half-Open 下是否已放过那个试探请求
+
+	nowFunc func() time.Time // 时钟函数（测试可注入假时钟）
+}
+
+// NewCircuitBreaker 构造熔断器，未配置的字段使用默认值。
+func NewCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
+	cb := &CircuitBreaker{
+		state:   StateClosed,
+		nowFunc: time.Now,
+	}
+	if cfg.FailureThreshold > 0 {
+		cb.failureThreshold = cfg.FailureThreshold
+	} else {
+		cb.failureThreshold = 0.5
+	}
+	if cfg.MinRequests > 0 {
+		cb.minRequests = cfg.MinRequests
+	} else {
+		cb.minRequests = 5
+	}
+	if cfg.Window > 0 {
+		cb.window = cfg.Window
+	} else {
+		cb.window = 10 * time.Second
+	}
+	if cfg.OpenTimeout > 0 {
+		cb.openTimeout = cfg.OpenTimeout
+	} else {
+		cb.openTimeout = 30 * time.Second
+	}
+	cb.windowStart = cb.nowFunc()
+	return cb
+}
+
+// State 返回当前状态（供测试/观察）。
+func (cb *CircuitBreaker) State() CircuitBreakerState {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	// 先推进窗口/半开切换，保证返回的是最新状态
+	cb.advance()
+	return cb.state
+}
+
+// allow 在发起请求前调用。返回 true 表示放行请求。
+// Closed 全放行；Open 全拒绝；Half-Open 只放第一个试探请求。
+func (cb *CircuitBreaker) allow() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.advance()
+
+	switch cb.state {
+	case StateClosed, StateHalfOpen:
+		// Closed：全放行；Half-Open：只放第一个试探请求
+		if cb.state == StateHalfOpen {
+			if cb.halfOpenProbeSent {
+				return false // 半开下已放过试探，其余拒绝
+			}
+			cb.halfOpenProbeSent = true
+		}
+		return true
+	case StateOpen:
+	default:
+	}
+	return false // Open：直接拒绝
+}
+
+// record 在请求完成后调用，记录一次成功/失败，并据此流转状态。
+func (cb *CircuitBreaker) record(success bool) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	now := cb.nowFunc()
+	cb.advance()
+
+	switch cb.state {
+	case StateHalfOpen:
+		// 试探请求的结果决定下一步
+		if success {
+			cb.resetCounters(now)
+			cb.state = StateClosed
+		} else {
+			cb.openSince = now
+			cb.state = StateOpen
+		}
+		return
+
+	case StateClosed:
+		if success {
+			cb.requestCount++
+		} else {
+			cb.requestCount++
+			cb.failureCount++
+		}
+		// 请求数足够且失败率超阈值 → 打开熔断
+		if cb.requestCount >= cb.minRequests &&
+			float64(cb.failureCount)/float64(cb.requestCount) > cb.failureThreshold {
+			cb.openSince = now
+			cb.state = StateOpen
+		}
+
+	case StateOpen:
+		// Open 下请求被拒绝，不记录（advance 已处理切换到半开的逻辑）
+	}
+}
+
+// advance 推进内部状态：处理窗口到期重置、Open→Half-Open 的时间切换。
+func (cb *CircuitBreaker) advance() {
+	now := cb.nowFunc()
+	switch cb.state {
+	case StateClosed:
+		// 窗口到期 → 重置统计（简单时间窗口，非滑动窗口）
+		if now.Sub(cb.windowStart) > cb.window {
+			cb.resetCounters(now)
+		}
+	case StateOpen:
+		// 熔断持续超时 → 进入半开，准备放试探请求
+		if now.Sub(cb.openSince) >= cb.openTimeout {
+			cb.state = StateHalfOpen
+			cb.halfOpenProbeSent = false
+		}
+	}
+}
+
+// resetCounters 清零窗口内统计并把窗口起始推进到 now。
+func (cb *CircuitBreaker) resetCounters(now time.Time) {
+	cb.requestCount = 0
+	cb.failureCount = 0
+	cb.windowStart = now
+}
+
+// newCircuitBreaker 便捷构造（与 NewCircuitBreaker 等价，内部用于默认实例）。
+func newCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
+	return NewCircuitBreaker(cfg)
+}
+
 // ============ HTTP 公共封装 ============
 
 // doPost 发起带鉴权头的 POST 请求，返回响应体字节。
@@ -316,6 +523,11 @@ func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload [
 
 	err := withRetry(reqCtx,
 		func(attempt int) error {
+			// 熔断判决：Open 直接拒绝不发请求；Half-Open 只放试探请求
+			if !c.cb.allow() {
+				return ErrCircuitOpen
+			}
+
 			req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(payload))
 			if err != nil {
 				return fmt.Errorf("构造请求失败: %w", err)
@@ -325,18 +537,21 @@ func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload [
 
 			resp, err := c.httpClient.Do(req)
 			if err != nil {
-				// 网络层错误（连接失败、超时等）→ 可重试
+				// 网络层错误（连接失败、超时等）→ 可重试；记入熔断失败
+				c.cb.record(false)
 				return &APIError{StatusCode: 0, Body: err.Error(), Retryable: true}
 			}
 			defer resp.Body.Close()
 
 			respBytes, err := io.ReadAll(resp.Body)
 			if err != nil {
+				c.cb.record(false)
 				return &APIError{StatusCode: resp.StatusCode, Body: "读取响应失败: " + err.Error(), Retryable: true}
 			}
 
 			// 2xx 成功
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				c.cb.record(true)
 				out = respBytes
 				return nil
 			}
@@ -346,6 +561,7 @@ func (c *OpenAIClient) doPost(ctx context.Context, url, apiKey string, payload [
 			//  - 429 限流 → 当前不重试（方案A；后续可接入 Retry-After 慢退避）
 			//  - 其余 4xx（401/400/404 等）→ 调用方错误，不重试
 			retryable := resp.StatusCode >= 500
+			c.cb.record(false)
 			return &APIError{
 				StatusCode: resp.StatusCode,
 				Body:       string(respBytes),

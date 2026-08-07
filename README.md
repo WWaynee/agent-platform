@@ -109,7 +109,7 @@
 - [x] 实现 Embedding 向量生成接口
 - [x] 超时控制
 - [x] 指数退避重试机制（1s→2s→4s + 抖动；500 重试 3 次 / 401 不重试 / 超时会重试）
-- [ ] 简易熔断器
+- [x] 简易熔断器（Closed→Open→Half-Open 三态流转；Open 直接拒绝不发 HTTP）
 - [ ] 结构化输出校验
 - [x] 测试：正常对话请求返回结果
 - [x] 测试：Embedding 调用返回向量（实测硅基流动，4096 维）
@@ -138,6 +138,14 @@
    - **HTTP 429 限流（本次调整为方案 A）**：当前**不参与退避重试**，直接返回错误。限流在语义上属于"可延迟重试"，但重试策略不同（需更保守、通常应尊重响应头 `Retry-After`），故本次与快速指数退避分离，先按"限流即失败"处理，后续可单独接入慢退避/Retry-After 加入重试。
    - 自测（`llmclient/client_test.go`，注入 8ms 小基数复现指数趋势）：① 持续 500 → 请求 4 次、耗时 > 退避总和理论值，证明间隔递增；② 401 → 只请求 1 次即返回；③ 首次超时后恢复 → 触发重试并最终成功。
    ⚠️ 注意点：自测为了让 1s→2s→4s 能毫秒级复现，`client_test.go` 覆盖 `retryBase` 为 8ms、`jitterRatio` 为 0；生产默认仍是 1s + 20% 抖动。抖动的意义在于多客户端**错开**重试时机，避免同时打满故障服务造成二次雪崩。
+
+6. **简易熔断器（容错三件套·熔断）**：在"超时 + 重试"之上再加一道快速失败闸门——LLM 服务一旦持续故障，重试只会继续打垮下游、浪费自身资源，需要**熔断**在状态层面整体短路。
+   → 解决：实现**三态熔断器 `CircuitBreaker`**（Closed → Open → Half-Open），作为 `OpenAIClient.cb` 字段注入，`doPost` 每次尝试前 `cb.allow()` 判决、请求后 `cb.record(success)` 统计，Chat/Embed 业务零感知。
+   - **状态流转**（简单计数器 + 时间窗口，无滑动窗口）：① Closed 窗口（10s）内请求数 ≥ `MinRequests`(5) 且失败率 > `FailureThreshold`(50%) → Open；② Open 持续 `OpenTimeout`(30s) → Half-Open；③ Half-Open 只放 1 个试探请求：成功 → Closed（清零计数），失败 → 回 Open。
+   - **Open 下不发起 HTTP**：`allow()` 返回 false 直接返回 `ErrCircuitOpen`，由 `retryableErr` 判定不可重试，避免熔断期间反复重试。
+   - **参数全部可配**（`CircuitBreakerConfig`），供测试注入小阈值/快时钟验证；为便于自测，`CircuitBreaker` 提供可注入的 `nowFunc` 假时钟，毫秒级跑完全状态机。
+   - 自测（`llmclient/client_test.go`）：① 单测四态流转（OpenOnFailure / OpenToHalfOpen / HalfOpenSuccess→Close / HalfOpenFail→StayOpen，用假时钟）；② 集成 `TestChat_CircuitBreaker_OpenNoHTTP`：持续 500 触发 Open 后，再调 `Chat` 直接返回 `ErrCircuitOpen` 且 **HTTP 请求计数不再增加**（保护下游）；③ `TestChat_CircuitBreaker_Recover`：半开试探成功后自动回 Closed 恢复正常。
+   ⚠️ 注意点：熔断与重试需**协作有序**——熔断错误（`ErrCircuitOpen`）必须是**不可重试**错误（`retryableErr` 已加 `errors.Is` 短路），否则 Open 时 withRetry 仍会重试打垮下游，熔断就失效了。这是"重试 + 熔断"组合的关键耦合点。
 
 #### 周五・Agent 骨架搭建
 
