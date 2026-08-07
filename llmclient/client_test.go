@@ -1,11 +1,15 @@
 package llmclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -390,4 +394,136 @@ func TestChat_CircuitBreaker_Recover(t *testing.T) {
 		t.Fatalf("应拿到恢复的响应，实际 content=%+v", resp)
 	}
 	t.Logf("✅ 熔断半开试探成功 → 自动恢复 closed，业务无感知")
+}
+
+// ---------------------- ChatWithJSON：JSON 输出校验与修复自测 ----------------------
+
+// agentAction 模拟 Agent 需要解析的结构化 Action。
+type agentAction struct {
+	Action string                 `json:"action"`
+	Tool   string                 `json:"tool"`
+	Args   map[string]interface{} `json:"args"`
+}
+
+// newChatJSONServer 模拟 OpenAI 兼容 /chat/completions 端点：
+// 把 contents 依次作为模型返回的 message.content（按顺序），并记录每次请求体。
+func newChatJSONServer(contents []string, bodies *[]string) *httptest.Server {
+	var i atomic.Int32
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 记录请求体
+		buf := new(bytes.Buffer)
+		_, _ = io.Copy(buf, r.Body)
+		if bodies != nil {
+			*bodies = append(*bodies, buf.String())
+		}
+		idx := int(i.Load())
+		content := contents[len(contents)-1]
+		if idx < len(contents) {
+			i.Add(1)
+			content = contents[idx]
+		}
+		// 包装成 OpenAI chat.completions 响应（content 可能含 ```、换行等，需转义）
+		contentJSON, _ := json.Marshal(content)
+		fmt.Fprintln(w, fmt.Sprintf(`{"choices":[{"message":{"content":%s}}]}`, contentJSON))
+	}))
+}
+
+func chatJSONReq() ChatRequest {
+	return ChatRequest{Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}}}
+}
+
+// TestChatWithJSON_Valid 自测点：正常返回合法 JSON，解析成功，并注入了 system 约束。
+func TestChatWithJSON_Valid(t *testing.T) {
+	var bodies []string
+	srv := newChatJSONServer([]string{
+		`{"action":"search","tool":"web","args":{"q":"go"}}`,
+	}, &bodies)
+	defer srv.Close()
+
+	client := newTestClient(srv.URL, time.Second, 0)
+
+	var out agentAction
+	if err := client.ChatWithJSON(context.Background(), chatJSONReq(), &out); err != nil {
+		t.Fatalf("合法 JSON 应解析成功，实际 err=%v", err)
+	}
+	if out.Action != "search" || out.Tool != "web" {
+		t.Fatalf("解析结果错误: %+v", out)
+	}
+	// 验证注入了严格 JSON 的 system 提示
+	if len(bodies) == 0 || !strings.Contains(bodies[0], "你必须只返回严格的合法 JSON") {
+		t.Fatalf("应注入严格 JSON system 提示，实际 body=%v", bodies)
+	}
+	t.Logf("✅ 正常合法 JSON 解析成功, out=%+v", out)
+}
+
+// TestChatWithJSON_CodeBlock 自测点：模型返回带 ```json 包裹，能自动剥离并解析成功。
+func TestChatWithJSON_CodeBlock(t *testing.T) {
+	srv := newChatJSONServer([]string{
+		"```json\n{\"action\":\"search\",\"tool\":\"web\"}\n```",
+	}, nil)
+	defer srv.Close()
+
+	client := newTestClient(srv.URL, time.Second, 0)
+
+	var out agentAction
+	if err := client.ChatWithJSON(context.Background(), chatJSONReq(), &out); err != nil {
+		t.Fatalf("带 ```json 包裹应剥离解析成功，实际 err=%v", err)
+	}
+	if out.Action != "search" {
+		t.Fatalf("解析结果错误: %+v", out)
+	}
+	t.Logf("✅ 自动剥离 ```json 代码块并解析成功, out=%+v", out)
+}
+
+// TestChatWithJSON_JunkRetry 自测点：完全乱的格式 → 重试一次（第二次返回合法 JSON）→ 成功。
+func TestChatWithJSON_JunkRetry(t *testing.T) {
+	var bodies []string
+	srv := newChatJSONServer([]string{
+		"一堆乱七八糟的文字 这不是JSON 也没有括号 {",
+		`{"action":"search","tool":"web","args":{"q":"go"}}`,
+	}, &bodies)
+	defer srv.Close()
+
+	client := newTestClient(srv.URL, time.Second, 0)
+
+	var out agentAction
+	if err := client.ChatWithJSON(context.Background(), chatJSONReq(), &out); err != nil {
+		t.Fatalf("乱格式重试后应成功，实际 err=%v", err)
+	}
+	if out.Action != "search" {
+		t.Fatalf("解析结果错误: %+v", out)
+	}
+	// 应请求 2 次（首次乱 + 重试），且重试请求带了"只返回 JSON"提示
+	if len(bodies) != 2 {
+		t.Fatalf("期望请求 2 次（含1次重试），实际 %d 次", len(bodies))
+	}
+	if !strings.Contains(bodies[1], "上一次返回的不是合法 JSON") {
+		t.Fatalf("重试请求应含'只返回 JSON'提示，实际 body=%v", bodies[1])
+	}
+	t.Logf("✅ 乱格式重试一次后成功: 请求次数=%d, out=%+v", len(bodies), out)
+}
+
+// TestChatWithJSON_StillJunk 自测点：完全乱格式且重试后仍乱 → 返回 JSONFormatError。
+func TestChatWithJSON_StillJunk(t *testing.T) {
+	srv := newChatJSONServer([]string{
+		"完全不是JSON 只是纯文字 没有任何括号结构",
+		"还是乱的 依然是纯文本 无法构成任何json对象",
+	}, nil)
+	defer srv.Close()
+
+	client := newTestClient(srv.URL, time.Second, 0)
+
+	var out agentAction
+	err := client.ChatWithJSON(context.Background(), chatJSONReq(), &out)
+	if err == nil {
+		t.Fatal("仍然乱格式应返回错误")
+	}
+	var jerr *JSONFormatError
+	if !errors.As(err, &jerr) {
+		t.Fatalf("期望返回 *JSONFormatError，实际 %T: %v", err, err)
+	}
+	if jerr.Raw == "" {
+		t.Fatal("JSONFormatError 应携带原始内容用于排障")
+	}
+	t.Logf("✅ 重试后仍乱 → 返回格式错误: %v", err)
 }

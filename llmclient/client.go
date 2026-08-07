@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,9 @@ import (
 type Client interface {
 	// Chat 发送对话请求，返回助手回复
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
+	// ChatWithJSON 发送对话并要求返回严格 JSON，解析结果写入 target
+	// （面向 Agent 结构化调用：ReAct 的 Action 解析等；含格式修复与一次重试）
+	ChatWithJSON(ctx context.Context, req ChatRequest, target interface{}) error
 	// Embed 将文本转为向量（用于 RAG 检索）
 	Embed(ctx context.Context, req EmbeddingRequest) (*EmbeddingResponse, error)
 }
@@ -155,6 +159,128 @@ func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
 	}, nil
+}
+
+// ============ ChatWithJSON：结构化 JSON 输出校验与修复 ============
+
+// JSONFormatError 表示 LLM 返回内容在"简单修复 + 重试一次"后仍无法解析为合法 JSON。
+type JSONFormatError struct {
+	Raw string // 模型最后一次原始返回，便于排障
+}
+
+func (e *JSONFormatError) Error() string {
+	return fmt.Sprintf("LLM 返回内容无法解析为合法 JSON（重试后仍失败）: %s", e.Raw)
+}
+
+// jsonSystemConstraint 注入的 system 提示，明确要求严格 JSON 输出。
+const jsonSystemConstraint = "你必须只返回严格的合法 JSON 对象，不要包含任何解释文字、" +
+	"不要使用 Markdown 代码块标记（如 ```json```）,不要加前后缀。返回内容必须能被直接解析为 JSON。"
+
+// injectJSONSystemPrompt 在请求最前面注入"严格 JSON"system 提示（不污染调用方原请求）。
+func injectJSONSystemPrompt(req ChatRequest) ChatRequest {
+	systemMsg := ChatMessage{Role: RoleSystem, Content: jsonSystemConstraint}
+	req.Messages = append([]ChatMessage{systemMsg}, req.Messages...)
+	return req
+}
+
+// addRepairHint 在重试时追加一条提示，明确告知模型上次返回的不是合法 JSON。
+func addRepairHint(req ChatRequest) ChatRequest {
+	req.Messages = append(req.Messages, ChatMessage{
+		Role:    RoleSystem,
+		Content: "你上一次返回的不是合法 JSON。请重新只返回一个合法 JSON 对象，不要加任何其他文字。",
+	})
+	return req
+}
+
+// ChatWithJSON 发送对话并要求返回严格 JSON，解析结果写入 target。
+// 面向 Agent/结构化调用场景（ReAct 的 Action 解析等）：
+//  1. 注入 system 提示明确要求模型返回严格 JSON。
+//  2. 拿到响应后先尝试直接解析；失败则做【简单修复】（去 ```json 包裹 / 去前后文字 / 补括号）。
+//  3. 修复后仍无法解析 → 重试一次，明确告知模型"只返回 JSON"。
+//  4. 重试后仍失败 → 返回 *JSONFormatError（含原始内容便于排障）。
+//
+// 返回错误时 target 内容不可靠；返回 nil 表示 target 已被正确填充。
+func (c *OpenAIClient) ChatWithJSON(ctx context.Context, req ChatRequest, target interface{}) error {
+	req = injectJSONSystemPrompt(req)
+
+	if err := c.callAndRepair(ctx, req, target); err == nil {
+		return nil
+	} else if !isJSONFormatError(err) {
+		// 上游错误（网络/超时/熔断等）不是格式问题，直接返回，不触发"重试改格式"
+		return err
+	}
+
+	// 格式错误 → 重试一次，明确告知模型只返回 JSON
+	retryReq := addRepairHint(req)
+	if err := c.callAndRepair(ctx, retryReq, target); err != nil {
+		return err
+	}
+	return nil
+}
+
+// callAndRepair 单次"调 Chat → 简单修复 → 解析进 target"。
+// 返回 nil 表示解析成功；返回 *JSONFormatError 表示修复后仍无法解析。
+func (c *OpenAIClient) callAndRepair(ctx context.Context, req ChatRequest, target interface{}) error {
+	resp, err := c.Chat(ctx, req)
+	if err != nil {
+		return err
+	}
+	content := resp.Content
+
+	// 先直接尝试解析
+	if err := json.Unmarshal([]byte(content), target); err == nil {
+		return nil
+	}
+
+	// 直接解析失败 → 简单修复后再试
+	fixed := normalizeJSON(content)
+	if err := json.Unmarshal([]byte(fixed), target); err != nil {
+		return &JSONFormatError{Raw: content}
+	}
+	return nil
+}
+
+// isJSONFormatError 判断 err 是否为格式错误（仅格式错误才触发"重试改格式"）。
+func isJSONFormatError(err error) bool {
+	var jerr *JSONFormatError
+	return errors.As(err, &jerr)
+}
+
+// normalizeJSON 尝试把 LLM 返回的多余文字/包裹还原为一段可解析的 JSON。
+// 依次执行：
+//  1. 去掉 ```json ... ``` 代码块包裹；
+//  2. 截取首个 "{" 到最后一个 "}" 之间的内容（丢弃前后多余文字）；
+//  3. 若 "{" 比 "}" 多，补上缺少的 "}"（简单补括号）；
+//  4. 去掉首尾空白。
+func normalizeJSON(raw string) string {
+	s := strings.TrimSpace(raw)
+
+	// 1. 去掉 ```json 代码块包裹
+	if strings.HasPrefix(s, "```") {
+		if idx := strings.Index(s, "\n"); idx != -1 {
+			s = s[idx+1:]
+		} else {
+			s = strings.TrimPrefix(s, "```")
+		}
+		s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "```"))
+	}
+
+	// 2. 截取首个 { 到最后一个 } 之间的对象骨架
+	first := strings.Index(s, "{")
+	last := strings.LastIndex(s, "}")
+	if first != -1 && last != -1 && last > first {
+		s = s[first : last+1]
+	}
+
+	// 3. 简单补括号
+	opens := strings.Count(s, "{")
+	closes := strings.Count(s, "}")
+	if opens > closes {
+		s += strings.Repeat("}", opens-closes)
+	}
+
+	// 4. 去首尾空白
+	return strings.TrimSpace(s)
 }
 
 // ============ Embedding 向量生成 ============

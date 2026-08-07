@@ -110,7 +110,7 @@
 - [x] 超时控制
 - [x] 指数退避重试机制（1s→2s→4s + 抖动；500 重试 3 次 / 401 不重试 / 超时会重试）
 - [x] 简易熔断器（Closed→Open→Half-Open 三态流转；Open 直接拒绝不发 HTTP）
-- [ ] 结构化输出校验
+- [x] 结构化输出校验（ChatWithJSON：严格 JSON 提示 + 简单修复 + 重试一次）
 - [x] 测试：正常对话请求返回结果
 - [x] 测试：Embedding 调用返回向量（实测硅基流动，4096 维）
 - [x] 测试：模拟超时，触发重试（单元测试：1ms 超时访问慢端点，快速失败不卡死）
@@ -146,6 +146,16 @@
    - **参数全部可配**（`CircuitBreakerConfig`），供测试注入小阈值/快时钟验证；为便于自测，`CircuitBreaker` 提供可注入的 `nowFunc` 假时钟，毫秒级跑完全状态机。
    - 自测（`llmclient/client_test.go`）：① 单测四态流转（OpenOnFailure / OpenToHalfOpen / HalfOpenSuccess→Close / HalfOpenFail→StayOpen，用假时钟）；② 集成 `TestChat_CircuitBreaker_OpenNoHTTP`：持续 500 触发 Open 后，再调 `Chat` 直接返回 `ErrCircuitOpen` 且 **HTTP 请求计数不再增加**（保护下游）；③ `TestChat_CircuitBreaker_Recover`：半开试探成功后自动回 Closed 恢复正常。
    ⚠️ 注意点：熔断与重试需**协作有序**——熔断错误（`ErrCircuitOpen`）必须是**不可重试**错误（`retryableErr` 已加 `errors.Is` 短路），否则 Open 时 withRetry 仍会重试打垮下游，熔断就失效了。这是"重试 + 熔断"组合的关键耦合点。
+
+7. **结构化 JSON 输出校验与修复（Agent 前置）**：周六做 ReAct Agent 时，LLM 必须返回结构化的 `Action`（调哪个工具、传什么参数），若返回格式不对 Agent 就解析不了、整个流程崩。LLM 常会包 ```json``` 代码块、加前后缀文字、甚至截断括号——这是 Agent 开发最常见的坑。
+   → 解决：新增 **`ChatWithJSON(ctx, req, target)`** 方法（加入 `Client` 接口，业务层可通过接口调用），三步容错：
+   1. **注入严格 JSON system 提示**：在请求最前面插一条"必须只返回严格合法 JSON、不要 Markdown 代码块/解释文字"的 system 约束（不改调用方原请求，拷贝注入）；
+   2. **简单修复 `normalizeJSON`**：剥 ```json``` 代码块 → 截取首 `{` 到末 `}` 的对象骨架（丢前后文字）→ 缺右括号则补齐 → 去首尾空白；
+   3. **重试一次**：修复后仍无法解析，则附加强调"你上次返回的不是合法 JSON，请只返回 JSON"再请求一次；重试后仍失败返回 `*JSONFormatError`（含原始内容便于排障）。
+   - **只对格式错误重试改格式**：用 `errors.As` 判断 `*JSONFormatError`，上游网络/超时/熔断错误直接返回、绝不误触"改格式重试"。
+   - 自测（`llmclient/client_test.go`，httptest mock OpenAI 端点）：
+     ① 正常合法 JSON → 解析成功，并断言注入了 system 约束；② 带 ```json``` 包裹 → 自动剥离解析成功；③ 完全乱格式 → 重试 1 次（第二次返回合法 JSON）→ 成功（断言请求 2 次、重试请求含"只返回 JSON"提示）；④ 仍乱 → 返回 `*JSONFormatError`。
+   - 真实验证：`go run` 临时脚本调真实 DeepSeek `ChatWithJSON`，成功解析出 `{"action":"search",...}`。⚠️ 注意点：`ChatWithJSON` 要求调用方预先把 `target` 结构定义成期望的 JSON 形状（`json` tag），解析用标准 `json.Unmarshal`；本方法是"保证能解析"，具体 schema 是否匹配由调用方结构定义决定。
 
 #### 周五・Agent 骨架搭建
 
