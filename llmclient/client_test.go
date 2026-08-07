@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +40,7 @@ func newTestClient(baseURL string, timeout time.Duration, maxRetries int) *OpenA
 			Window:           10 * time.Second,
 			OpenTimeout:      30 * time.Second,
 		}),
+		usageStats: &UsageStats{},
 	}
 }
 
@@ -526,4 +528,142 @@ func TestChatWithJSON_StillJunk(t *testing.T) {
 		t.Fatal("JSONFormatError 应携带原始内容用于排障")
 	}
 	t.Logf("✅ 重试后仍乱 → 返回格式错误: %v", err)
+}
+
+// ---------------------- Token 用量统计封装自测 ----------------------
+
+// collectingReporter 实现 UsageReporter，收集所有上报事件供断言。
+type collectingReporter struct {
+	mu     sync.Mutex
+	events []UsageEvent
+}
+
+func (r *collectingReporter) Report(_ context.Context, ev UsageEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, ev)
+}
+func (r *collectingReporter) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.events)
+}
+
+// usageMockServer 模拟 OpenAI 端点，按操作返回带 usage 的响应。
+func usageMockServer(t *testing.T) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/embeddings" {
+			// Embedding：prompt=44, total=44
+			fmt.Fprintln(w, `{"data":[{"embedding":[0.1,0.2,0.3]}],"usage":{"prompt_tokens":44,"total_tokens":44}}`)
+			return
+		}
+		// Chat：prompt=12, completion=34, total=46
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"你好"}}],"usage":{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46}}`)
+	}))
+}
+
+// TestUsage_ReporterAndStats 自测点：每次调用都能拿到准确的 token 数，
+// 回调事件携带操作类型/模型/成功标志；内置累计统计正确累加。
+func TestUsage_ReporterAndStats(t *testing.T) {
+	srv := usageMockServer(t)
+	defer srv.Close()
+
+	client := newTestClient(srv.URL, time.Second, 0)
+	rep := &collectingReporter{}
+	client.SetUsageReporter(rep)
+
+	// 1 次 Chat
+	if _, err := client.Chat(context.Background(), ChatRequest{
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	// 2 次 Embedding
+	for i := 0; i < 2; i++ {
+		if _, err := client.Embed(context.Background(), EmbeddingRequest{Input: "text"}); err != nil {
+			t.Fatalf("Embedding 失败: %v", err)
+		}
+	}
+
+	// 回调应收到 3 个事件
+	if got := rep.count(); got != 3 {
+		t.Fatalf("期望 3 个上报事件，实际 %d", got)
+	}
+
+	// 断言每个事件的 token 数准确
+	for i, ev := range rep.events {
+		t.Logf("  事件[%d] op=%s model=%s success=%v tokens=%+v", i, ev.Operation, ev.Model, ev.Success, ev.Tokens)
+	}
+	chatEv := rep.events[0]
+	embedEv := rep.events[1]
+
+	if chatEv.Operation != OperationChat || chatEv.Model != "test-model" || !chatEv.Success {
+		t.Fatalf("Chat 事件字段错误: %+v", chatEv)
+	}
+	if chatEv.Tokens.TotalTokens != 46 || chatEv.Tokens.PromptTokens != 12 || chatEv.Tokens.CompletionTokens != 34 {
+		t.Fatalf("Chat token 数不对: %+v", chatEv.Tokens)
+	}
+	if embedEv.Operation != OperationEmbed || !embedEv.Success {
+		t.Fatalf("Embed 事件字段错误: %+v", embedEv)
+	}
+	if embedEv.Tokens.TotalTokens != 44 || embedEv.Tokens.PromptTokens != 44 || embedEv.Tokens.CompletionTokens != 0 {
+		t.Fatalf("Embed token 数不对: %+v", embedEv.Tokens)
+	}
+	if chatEv.Duration <= 0 {
+		t.Fatal("事件应带耗时")
+	}
+
+	// 内置累计统计：1 Chat + 2 Embed = 3 次调用
+	calls, prompt, completion, total := client.GetUsageStats()
+	if calls != 3 {
+		t.Fatalf("累计调用次数应为 3，实际 %d", calls)
+	}
+	if prompt != 12+44+44 {
+		t.Fatalf("累计 prompt 应为 %d，实际 %d", 12+44+44, prompt)
+	}
+	if completion != 34 {
+		t.Fatalf("累计 completion 应为 34，实际 %d", completion)
+	}
+	if total != 46+44+44 {
+		t.Fatalf("累计 total 应为 %d，实际 %d", 46+44+44, total)
+	}
+	t.Logf("✅ 用量统计正确: 事件=%d, 累计 calls=%d prompt=%d completion=%d total=%d",
+		rep.count(), calls, prompt, completion, total)
+}
+
+// TestUsage_ReporterFailure 自测点：调用失败时回调也应收到（Success=false、带错误），
+// 但 token 不虚增，累计统计只记次数、总量不变。
+func TestUsage_ReporterFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError) // 持续失败
+	}))
+	defer srv.Close()
+
+	client := newRetryTestClient(srv.URL, 0) // 不重试，保证可控
+	rep := &collectingReporter{}
+	client.SetUsageReporter(rep)
+
+	if _, err := client.Chat(context.Background(), ChatRequest{
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}},
+	}); err == nil {
+		t.Fatal("期望调用失败")
+	}
+
+	if rep.count() != 1 {
+		t.Fatalf("失败也应上报 1 个事件，实际 %d", rep.count())
+	}
+	ev := rep.events[0]
+	if ev.Success || ev.Error == nil {
+		t.Fatalf("失败事件应 Success=false 且带 Error，实际 %+v", ev)
+	}
+
+	// 失败不消耗 token：累计只有次数，总量为 0
+	calls, _, _, total := client.GetUsageStats()
+	if calls != 1 {
+		t.Fatalf("累计调用次数应为 1，实际 %d", calls)
+	}
+	if total != 0 {
+		t.Fatalf("失败不应增加 token 总量，实际 %d", total)
+	}
+	t.Log("✅ 失败也上报回调，且 token 不虚增")
 }

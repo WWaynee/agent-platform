@@ -47,6 +47,11 @@ type OpenAIClient struct {
 
 	// cb 简易熔断器：Closed →（失败率超阈值）→ Open →（超时后）→ Half-Open →（试探）→ 回 Closed/Open。
 	cb *CircuitBreaker
+
+	// 用量统计：内置累计统计 + 可注入回调钩子（供租户用量统计/限流，见 usage.go）。
+	usageMu       sync.Mutex    // 保护 usageReporter
+	usageReporter UsageReporter // 用量回调钩子（可空）
+	usageStats    *UsageStats   // 内置累计用量统计（始终启用）
 }
 
 // LLMConfig 客户端内部使用的配置（从全局 config 拷贝，避免后续全局改动影响已建实例）
@@ -91,6 +96,38 @@ func NewClient(llm config.LLMConfig) Client {
 			Window:           10 * time.Second,
 			OpenTimeout:      30 * time.Second,
 		}),
+
+		usageStats: &UsageStats{},
+	}
+}
+
+// SetUsageReporter 注册用量回调钩子。
+// 上层可用它做租户用量统计、持久化、限流决策等；传 nil 表示取消回调。
+// 支持并发调用，注册后对之后的调用生效。
+func (c *OpenAIClient) SetUsageReporter(r UsageReporter) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.usageReporter = r
+}
+
+// GetUsageStats 返回内置累计用量统计的快照（共调用次数、prompt/completion/total 总量）。
+// 不加回调也能拿到客户端累计消耗的整体视图。
+func (c *OpenAIClient) GetUsageStats() (calls int, prompt, completion, total int64) {
+	return c.usageStats.Snapshot()
+}
+
+// reportUsage 在每次调用完成后触发：① 累加进内置统计；② 报告给回调钩子。
+// ctx 用发起本次调用的上下文，使上层能通过 WithValue 读取租户等标识。
+func (c *OpenAIClient) reportUsage(ctx context.Context, ev UsageEvent) {
+	// 无论成功失败都累加计数（失败无 token 消耗，总量不会虚增）
+	c.usageStats.add(ev.Operation, ev.Tokens)
+
+	// 回调钩子（可空）；取引用时加锁，避免与 SetUsageReporter 并发覆盖
+	c.usageMu.Lock()
+	rep := c.usageReporter
+	c.usageMu.Unlock()
+	if rep != nil {
+		rep.Report(ctx, ev)
 	}
 }
 
@@ -137,28 +174,45 @@ func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse
 
 	// 发起 POST 请求（对话使用主配置的 baseURL + apiKey）
 	url := c.cfg.BaseURL + "/chat/completions"
+	start := time.Now()
 	respBytes, err := c.doPost(ctx, url, c.cfg.APIKey, payload)
 	if err != nil {
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationChat, Model: c.cfg.ChatModel,
+			Success: false, Duration: time.Since(start), Error: err,
+		})
 		return nil, err
 	}
 
 	// 解析响应
 	var resp openaiChatResp
 	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		perr := fmt.Errorf("解析响应失败: %w", err)
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationChat, Model: c.cfg.ChatModel,
+			Success: false, Duration: time.Since(start), Error: perr,
+		})
+		return nil, perr
 	}
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("响应中没有 choices 内容")
+		perr := fmt.Errorf("响应中没有 choices 内容")
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationChat, Model: c.cfg.ChatModel,
+			Success: false, Duration: time.Since(start), Error: perr,
+		})
+		return nil, perr
 	}
 
-	return &ChatResponse{
-		Content: resp.Choices[0].Message.Content,
-		Usage: TokenUsage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-		},
-	}, nil
+	usage := TokenUsage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		TotalTokens:      resp.Usage.TotalTokens,
+	}
+	c.reportUsage(ctx, UsageEvent{
+		Ctx: ctx, Operation: OperationChat, Model: c.cfg.ChatModel,
+		Tokens: usage, Success: true, Duration: time.Since(start),
+	})
+	return &ChatResponse{Content: resp.Choices[0].Message.Content, Usage: usage}, nil
 }
 
 // ============ ChatWithJSON：结构化 JSON 输出校验与修复 ============
@@ -315,28 +369,46 @@ func (c *OpenAIClient) Embed(ctx context.Context, req EmbeddingRequest) (*Embedd
 
 	// 向量服务可独立配置：优先用 EmbedBaseURL/EmbedAPIKey，为空则回退用主配置
 	baseURL, apiKey := c.embedEndpoint()
+	model := c.cfg.EmbeddingModel
 	url := baseURL + "/embeddings"
+	start := time.Now()
 	respBytes, err := c.doPost(ctx, url, apiKey, payload)
 	if err != nil {
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationEmbed, Model: model,
+			Success: false, Duration: time.Since(start), Error: err,
+		})
 		return nil, err
 	}
 
 	var resp openaiEmbedResp
 	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		perr := fmt.Errorf("解析响应失败: %w", err)
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationEmbed, Model: model,
+			Success: false, Duration: time.Since(start), Error: perr,
+		})
+		return nil, perr
 	}
 	if len(resp.Data) == 0 {
-		return nil, fmt.Errorf("响应中没有向量数据")
+		perr := fmt.Errorf("响应中没有向量数据")
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationEmbed, Model: model,
+			Success: false, Duration: time.Since(start), Error: perr,
+		})
+		return nil, perr
 	}
 
-	return &EmbeddingResponse{
-		Vector: resp.Data[0].Embedding,
-		Usage: TokenUsage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: 0,
-			TotalTokens:      resp.Usage.TotalTokens,
-		},
-	}, nil
+	usage := TokenUsage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: 0,
+		TotalTokens:      resp.Usage.TotalTokens,
+	}
+	c.reportUsage(ctx, UsageEvent{
+		Ctx: ctx, Operation: OperationEmbed, Model: model,
+		Tokens: usage, Success: true, Duration: time.Since(start),
+	})
+	return &EmbeddingResponse{Vector: resp.Data[0].Embedding, Usage: usage}, nil
 }
 
 // embedEndpoint 返回向量服务使用的 BaseURL 与 APIKey。

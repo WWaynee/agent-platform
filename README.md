@@ -111,6 +111,7 @@
 - [x] 指数退避重试机制（1s→2s→4s + 抖动；500 重试 3 次 / 401 不重试 / 超时会重试）
 - [x] 简易熔断器（Closed→Open→Half-Open 三态流转；Open 直接拒绝不发 HTTP）
 - [x] 结构化输出校验（ChatWithJSON：严格 JSON 提示 + 简单修复 + 重试一次）
+- [x] Token 用量统计封装（内置累计统计 + 用量回调钩子，供租户统计/限流预留）
 - [x] 测试：正常对话请求返回结果
 - [x] 测试：Embedding 调用返回向量（实测硅基流动，4096 维）
 - [x] 测试：模拟超时，触发重试（单元测试：1ms 超时访问慢端点，快速失败不卡死）
@@ -156,6 +157,14 @@
    - 自测（`llmclient/client_test.go`，httptest mock OpenAI 端点）：
      ① 正常合法 JSON → 解析成功，并断言注入了 system 约束；② 带 ```json``` 包裹 → 自动剥离解析成功；③ 完全乱格式 → 重试 1 次（第二次返回合法 JSON）→ 成功（断言请求 2 次、重试请求含"只返回 JSON"提示）；④ 仍乱 → 返回 `*JSONFormatError`。
    - 真实验证：`go run` 临时脚本调真实 DeepSeek `ChatWithJSON`，成功解析出 `{"action":"search",...}`。⚠️ 注意点：`ChatWithJSON` 要求调用方预先把 `target` 结构定义成期望的 JSON 形状（`json` tag），解析用标准 `json.Unmarshal`；本方法是"保证能解析"，具体 schema 是否匹配由调用方结构定义决定。
+
+8. **Token 用量统计封装（为租户统计/限流预留）**：客户端每次 Chat/Embedding 都能拿到 token 用量（`resp.Usage`），但分散在业务调用处，没有统一采集点。下周要做租户用量统计、限流，若届时再在客户端里补统计逻辑就要到处改客户端代码。
+   → 解决：客户端内置一套**用量统计封装**（`llmclient/usage.go`），两大块：
+   1. **内置累计统计 `UsageStats`**：并发安全地累加 Chat/Embedding 调用次数与 prompt/completion/total 总量，暴露 `GetUsageStats()` 快照，随时查看整体消耗。
+   2. **用量回调钩子 `UsageReporter` 接口**：每次调用完成（成功或失败）触发 `Report(ctx, UsageEvent)`。`UsageEvent` 携带**操作类型（chat/embed）、模型名、token 用量、成功与否、耗时、错误**，供上层做租户用量统计、持久化、限流决策等；通过 `SetUsageReporter()` 注册，面向接口可替换、可扩展。
+   - **为租户维度预留**：`Report` 收到的是发起本次调用的上下文——上层可在调用前用 `ctx` 的 `WithValue` 注入租户标识，回调实现自行提取，**无需改动调用接口**。失败时也上报（`Success=false` 并带错误），但 token 不虚增（失败无消耗，总量不变）。
+   - 自测（`llmclient/client_test.go`）：① `TestUsage_ReporterAndStats`：1 次 Chat(12/34/46) + 2 次 Embedding(44/0/44) → 回调收到 3 个准确事件，累计 calls=3 / prompt=100 / completion=34 / total=134；② `TestUsage_ReporterFailure`：调用失败回调也收到 `Success=false`，累计只记次数、token 总量为 0。
+   ⚠️ 注意点：回调**不应阻塞**（实现在异步消费/快速返回）；失败与成功的调用都计入次数（统计调用量），但失败不增加 token 消耗。为后续租户限流，上层只需在 `SetUsageReporter` 的实现里结合租户标识累计即可，无需改动客户端。
 
 #### 周五・Agent 骨架搭建
 
