@@ -149,7 +149,7 @@
 
 #### 周五・Agent 骨架搭建
 
-- [ ] agent 包分层：engine / memory / toolmanager
+- [x] agent 包分层：engine / memory / toolmanager
 - [ ] 定义工具标准接口
 - [ ] 实现工具注册机制
 - [ ] 定义 ReAct 引擎结构体
