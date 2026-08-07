@@ -118,53 +118,34 @@
 
 #### 📌 周四遇到的问题与解决方案
 
-1. **DeepSeek 不提供可用的 Embedding 接口**：周四要调 Embedding 生成向量，但实测 `api.deepseek.com/v1/embeddings` 返回 404（DeepSeek 官方目前未开放 embedding 能力），且 `.env` 里原配的模型 `text-embedding-v1` 在 DeepSeek 上也不存在。
-   → 解决：改用**硅基流动（SiliconFlow）**作为向量服务——`https://api.siliconflow.cn/v1/embeddings` + `Qwen/Qwen3-VL-Embedding-8B`，实测返回 4096 维向量，token 用量正常。
+1. **DeepSeek 不开放 Embedding 接口**：官方向量接口返回 404，原配模型也不存在，向量功能无法落地。
+   → 解决：向量服务改接**硅基流动**，实测返回 4096 维向量、token 用量正常。
 
-2. **Chat 与 Embedding 分属不同厂商（两套 key + 域名）**：对话走 DeepSeek（`sk-a628...` / `api.deepseek.com`），向量走硅基流动（`sk-alpwy...` / `api.siliconflow.cn`），两个厂商 key 不同、域名不同，而 llmclient 原本 Chat/Embedding 共享同一套 BaseURL+APIKey。
-   → 解决：给 `LLMConfig` 新增**可选**的 `EmbedAPIKey` / `EmbedBaseURL`（读取 `LLM_EMBED_API_KEY` / `LLM_EMBED_BASE_URL`），`Embed()` 通过 `embedEndpoint()` **优先用独立向量配置、留空则自动回退主配置**。这样既支持多厂商（DeepSeek 对话 + 硅基流动向量），又向后兼容"单一厂商全包"场景，业务代码零改动。
+2. **Chat 与 Embedding 分属不同厂商（两套 key + 域名）**：对话走 DeepSeek、向量走硅基流动，key 和域名都不同，共享一套配置会冲突。
+   → 解决：向量支持**独立配置、留空自动回退主配置**，实现多厂商又能向后兼容单一厂商场景，业务侧零改动。
 
-3. **不同厂商 baseURL 是否带 `/v1` 前缀不一致**：DeepSeek baseURL 为 `https://api.deepseek.com`（不带 `/v1`，拼接 `/chat/completions` / `/embeddings` 即可用）；而硅基流动需要 `https://api.siliconflow.cn/v1`（带 `/v1`）才能命中端点。
-   → 解决：baseURL 由配置按厂商各自指定（`.env` 中主 BaseURL=DeepSeek、EmbedBaseURL=硅基流动已分别配好），代码统一拼接 `/chat/completions` / `/embeddings`，互不影响。
+3. **不同厂商 baseURL 是否带 `/v1` 前缀不一致**：DeepSeek 不带、硅基流动带，拼接方式不同。
+   → 解决：baseURL 由各厂商在配置里各自指定，代码统一按配置拼接接口路径，互不影响。
 
-4. **超时 + 重试的组合陷阱（容错三件套·超时）**：最初 `http.Client.Timeout` 只管**单次请求**超时，一旦超时进入重试循环，会因为"整体无总预算"而反复超时重试 N 次，总耗时 = 超时×(重试次数+1)，在服务真实不稳定时会把请求无限拖住，违背"快速失败"目标。
-   → 解决（方案 B：超时 + 重试 + 整体 deadline 预算）：`doPost` 内为**整个重试循环**创建基于配置 `Timeout` 的 `context.WithTimeout`（若外部 ctx 未设 deadline）。每次请求都用该 ctx，退避等待也用 `select` 监听 ctx 取消；一旦总预算耗尽（deadline reached）立即返回 `请求超时` 错误并停止重试。可重试错误为网络错误 / HTTP 429 / 5xx；4xx（如 401）不重试。实测：`Timeout=1ms` 访问挂起 200ms 的慢端点，**仅耗时 1.3ms** 即返回超时错误且不崩溃（单元测试 `llmclient/client_test.go`）。
-   ⚠️ 注意点：重试只对**瞬时/服务端**错误有意义，超时必须受**整体时间预算**约束，否则超时在重试中会被无限放大；`http.Client.Timeout` 保留作为"单次请求兜底"，与整体 deadline 保持一致（都取配置 Timeout），二者无冲突。
+4. **超时 + 重试的组合陷阱（容错·超时）**：超时只作用于单次请求，一旦进入重试循环会因"整体无时间预算"而反复超时重试，把请求无限拖住，违背快速失败。
+   → 解决：为整轮请求（含所有重试）设**整体时间预算**，预算耗尽即立即返回超时并停止重试。实测 1ms 超时访问慢端点仅约 1ms 即快速返回、不卡死、服务稳定。
+   ⚠️ 注意点：重试只对**瞬时/服务端**错误有意义，超时必须受整体预算约束，否则会被重试无限放大。
 
-5. **指数退避重试的标准实现（容错三件套·重试）**：最初的退避是 `250ms→500ms→1s`（公式 `1<<(attempt-1)*250ms`）且**无随机抖动**，不满足行业标准指数退避（1s→2s→4s + 抖动防雪崩），重试逻辑也耦合在 `doPost` 的 HTTP 分支里难复用。
-   → 解决：重构出**通用重试包装器 `withRetry(ctx, fn, isRetryable, maxRetries, baseDelay, jitterRatio)`**，把"循环 + 指数退避等待 + 抖动 + 是否继续"从 HTTP 逻辑中解耦（后续熔断可直接复用）；`OpenAIClient` 暴露内部 `retryBase`/`jitterRatio`（默认 1s、20% 抖动），`doPost` 用 `APIError{StatusCode, Retryable}` 标记错误可重试性，`retryableErr()` 决策是否继续。
-   - **退避序列**：`baseDelay × 2^(attempt-1)`，即 1s→2s→4s；叠加 `[1, 1+jitterRatio]` 随机因子抖动。
-   - **可重试**：网络错误（连接失败/超时）、HTTP 5xx。
-   - **不重试**：HTTP 401/400/404 等调用方错误。
-   - **HTTP 429 限流（本次调整为方案 A）**：当前**不参与退避重试**，直接返回错误。限流在语义上属于"可延迟重试"，但重试策略不同（需更保守、通常应尊重响应头 `Retry-After`），故本次与快速指数退避分离，先按"限流即失败"处理，后续可单独接入慢退避/Retry-After 加入重试。
-   - 自测（`llmclient/client_test.go`，注入 8ms 小基数复现指数趋势）：① 持续 500 → 请求 4 次、耗时 > 退避总和理论值，证明间隔递增；② 401 → 只请求 1 次即返回；③ 首次超时后恢复 → 触发重试并最终成功。
-   ⚠️ 注意点：自测为了让 1s→2s→4s 能毫秒级复现，`client_test.go` 覆盖 `retryBase` 为 8ms、`jitterRatio` 为 0；生产默认仍是 1s + 20% 抖动。抖动的意义在于多客户端**错开**重试时机，避免同时打满故障服务造成二次雪崩。
+5. **指数退避重试的标准化（容错·重试）**：最初的退避是非标准固定基数且无抖动，重试错误语义也不统一。
+   → 解决：采用标准**指数退避 + 随机抖动**（1s→2s→4s，抖动用于多客户端错开重试时机、防雪崩）；只对网络错误/超时/服务端 5xx 重试，调用方错误（4xx）不重试；429 限流本次按"不重试"处理（方案A，后续再按限流语义接入慢退避）。
+   ⚠️ 注意点：自测为了毫秒级复现指数趋势，测试中把小基数注入客户端；生产默认仍是 1s + 20% 抖动。
 
-6. **简易熔断器（容错三件套·熔断）**：在"超时 + 重试"之上再加一道快速失败闸门——LLM 服务一旦持续故障，重试只会继续打垮下游、浪费自身资源，需要**熔断**在状态层面整体短路。
-   → 解决：实现**三态熔断器 `CircuitBreaker`**（Closed → Open → Half-Open），作为 `OpenAIClient.cb` 字段注入，`doPost` 每次尝试前 `cb.allow()` 判决、请求后 `cb.record(success)` 统计，Chat/Embed 业务零感知。
-   - **状态流转**（简单计数器 + 时间窗口，无滑动窗口）：① Closed 窗口（10s）内请求数 ≥ `MinRequests`(5) 且失败率 > `FailureThreshold`(50%) → Open；② Open 持续 `OpenTimeout`(30s) → Half-Open；③ Half-Open 只放 1 个试探请求：成功 → Closed（清零计数），失败 → 回 Open。
-   - **Open 下不发起 HTTP**：`allow()` 返回 false 直接返回 `ErrCircuitOpen`，由 `retryableErr` 判定不可重试，避免熔断期间反复重试。
-   - **参数全部可配**（`CircuitBreakerConfig`），供测试注入小阈值/快时钟验证；为便于自测，`CircuitBreaker` 提供可注入的 `nowFunc` 假时钟，毫秒级跑完全状态机。
-   - 自测（`llmclient/client_test.go`）：① 单测四态流转（OpenOnFailure / OpenToHalfOpen / HalfOpenSuccess→Close / HalfOpenFail→StayOpen，用假时钟）；② 集成 `TestChat_CircuitBreaker_OpenNoHTTP`：持续 500 触发 Open 后，再调 `Chat` 直接返回 `ErrCircuitOpen` 且 **HTTP 请求计数不再增加**（保护下游）；③ `TestChat_CircuitBreaker_Recover`：半开试探成功后自动回 Closed 恢复正常。
-   ⚠️ 注意点：熔断与重试需**协作有序**——熔断错误（`ErrCircuitOpen`）必须是**不可重试**错误（`retryableErr` 已加 `errors.Is` 短路），否则 Open 时 withRetry 仍会重试打垮下游，熔断就失效了。这是"重试 + 熔断"组合的关键耦合点。
+6. **简易熔断器（容错·熔断）**：仅靠超时与重试，服务持续故障时仍会反复请求打垮下游、浪费资源，需要状态层面的整体短路。
+   → 解决：实现**三态熔断器（Closed → Open → Half-Open）**，客户端内部生效、业务无感知。窗口内失败率超标（且请求数够多）即熔断打开——此后请求**直接快速失败、不再发 HTTP**；熔断持续一段时间后进入半开放一个试探请求：成功回关闭、失败继续熔断。参数全部可配，便于测试快速验证。
+   ⚠️ 注意点：熔断与重试需协作有序——熔断期间的错误必须**不可重试**，否则 Open 时仍会重试打垮下游，熔断就失去意义。
 
-7. **结构化 JSON 输出校验与修复（Agent 前置）**：周六做 ReAct Agent 时，LLM 必须返回结构化的 `Action`（调哪个工具、传什么参数），若返回格式不对 Agent 就解析不了、整个流程崩。LLM 常会包 ```json``` 代码块、加前后缀文字、甚至截断括号——这是 Agent 开发最常见的坑。
-   → 解决：新增 **`ChatWithJSON(ctx, req, target)`** 方法（加入 `Client` 接口，业务层可通过接口调用），三步容错：
-   1. **注入严格 JSON system 提示**：在请求最前面插一条"必须只返回严格合法 JSON、不要 Markdown 代码块/解释文字"的 system 约束（不改调用方原请求，拷贝注入）；
-   2. **简单修复 `normalizeJSON`**：剥 ```json``` 代码块 → 截取首 `{` 到末 `}` 的对象骨架（丢前后文字）→ 缺右括号则补齐 → 去首尾空白；
-   3. **重试一次**：修复后仍无法解析，则附加强调"你上次返回的不是合法 JSON，请只返回 JSON"再请求一次；重试后仍失败返回 `*JSONFormatError`（含原始内容便于排障）。
-   - **只对格式错误重试改格式**：用 `errors.As` 判断 `*JSONFormatError`，上游网络/超时/熔断错误直接返回、绝不误触"改格式重试"。
-   - 自测（`llmclient/client_test.go`，httptest mock OpenAI 端点）：
-     ① 正常合法 JSON → 解析成功，并断言注入了 system 约束；② 带 ```json``` 包裹 → 自动剥离解析成功；③ 完全乱格式 → 重试 1 次（第二次返回合法 JSON）→ 成功（断言请求 2 次、重试请求含"只返回 JSON"提示）；④ 仍乱 → 返回 `*JSONFormatError`。
-   - 真实验证：`go run` 临时脚本调真实 DeepSeek `ChatWithJSON`，成功解析出 `{"action":"search",...}`。⚠️ 注意点：`ChatWithJSON` 要求调用方预先把 `target` 结构定义成期望的 JSON 形状（`json` tag），解析用标准 `json.Unmarshal`；本方法是"保证能解析"，具体 schema 是否匹配由调用方结构定义决定。
+7. **结构化 JSON 输出校验与修复（Agent 前置）**：周六 ReAct 需要 LLM 返回结构化 Action（调哪个工具、传什么参数），格式不对整条流程就崩；而 LLM 常会包代码块、加前后缀文字、截断括号，这是 Agent 开发最常见的坑。
+   → 解决：提供**"必须返回严格 JSON + 简单修复 + 重试一次"**三步容错：先注入严格 JSON 提示；拿到响应先尝试解析，失败则自动剥离代码块、取对象主体、补全括号；仍失败则明确告知"只返回 JSON"再请求一次，再不行返回含原始内容的格式错误。
+   ⚠️ 注意点：只对**格式问题**触发"重试改格式"，网络/超时/熔断等上游错误直接返回、绝不误触；调用方需预先定义好期望的 JSON 结构，本能力保证"能解析"，不保证结构完全匹配。
 
-8. **Token 用量统计封装（为租户统计/限流预留）**：客户端每次 Chat/Embedding 都能拿到 token 用量（`resp.Usage`），但分散在业务调用处，没有统一采集点。下周要做租户用量统计、限流，若届时再在客户端里补统计逻辑就要到处改客户端代码。
-   → 解决：客户端内置一套**用量统计封装**（`llmclient/usage.go`），两大块：
-   1. **内置累计统计 `UsageStats`**：并发安全地累加 Chat/Embedding 调用次数与 prompt/completion/total 总量，暴露 `GetUsageStats()` 快照，随时查看整体消耗。
-   2. **用量回调钩子 `UsageReporter` 接口**：每次调用完成（成功或失败）触发 `Report(ctx, UsageEvent)`。`UsageEvent` 携带**操作类型（chat/embed）、模型名、token 用量、成功与否、耗时、错误**，供上层做租户用量统计、持久化、限流决策等；通过 `SetUsageReporter()` 注册，面向接口可替换、可扩展。
-   - **为租户维度预留**：`Report` 收到的是发起本次调用的上下文——上层可在调用前用 `ctx` 的 `WithValue` 注入租户标识，回调实现自行提取，**无需改动调用接口**。失败时也上报（`Success=false` 并带错误），但 token 不虚增（失败无消耗，总量不变）。
-   - 自测（`llmclient/client_test.go`）：① `TestUsage_ReporterAndStats`：1 次 Chat(12/34/46) + 2 次 Embedding(44/0/44) → 回调收到 3 个准确事件，累计 calls=3 / prompt=100 / completion=34 / total=134；② `TestUsage_ReporterFailure`：调用失败回调也收到 `Success=false`，累计只记次数、token 总量为 0。
-   ⚠️ 注意点：回调**不应阻塞**（实现在异步消费/快速返回）；失败与成功的调用都计入次数（统计调用量），但失败不增加 token 消耗。为后续租户限流，上层只需在 `SetUsageReporter` 的实现里结合租户标识累计即可，无需改动客户端。
+8. **Token 用量统计封装（为租户统计/限流预留）**：每次调用的 token 用量可用但没有统一采集点，且下周要做租户用量统计与限流，届时再补就要到处改客户端。
+   → 解决：客户端内置**用量统计封装**，两块能力：① **累计用量统计**，并发安全累加调用次数与各类 token 总量，可随时查看整体消耗；② **用量回调钩子接口**，每次调用（成功或失败）都上报一次操作、模型、用量、成败、耗时，供上层做租户统计/限流，面向接口可替换、可扩展。为租户维度预留：回调携带发起调用的上下文，上层注入租户标识即可，无需改动调用接口。
+   ⚠️ 注意点：回调应**快速返回/异步消费**，避免阻塞业务调用；失败也计入调用次数，但不增加 token 消耗。
 
 #### 周五・Agent 骨架搭建
 
