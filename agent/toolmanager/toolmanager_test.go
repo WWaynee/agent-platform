@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-platform/agent/engine"
+	"agent-platform/agent/interfaces"
 )
 
 // 假工具：仅用于测试管理器逻辑，不含真实业务。
@@ -15,7 +15,7 @@ type fakeTool struct{}
 func (fakeTool) Name() string        { return "fake_tool" }
 func (fakeTool) Description() string { return "测试用假工具" }
 func (fakeTool) Parameters() string  { return `{"type":"object"}` }
-func (fakeTool) Execute(ctx engine.AgentContext, params string) (string, error) {
+func (fakeTool) Execute(ctx interfaces.AgentContext, params string) (string, error) {
 	return "executed:" + params + ":tenant=" + strconv.FormatUint(ctx.TenantID, 10), nil
 }
 
@@ -54,7 +54,7 @@ func TestToolManager(t *testing.T) {
 	}
 
 	// 执行：命中
-	out, err := m.ExecuteTool(engine.AgentContext{TenantID: 7}, "fake_tool", `{"q":"hi"}`)
+	out, err := m.ExecuteTool(interfaces.AgentContext{TenantID: 7}, "fake_tool", `{"q":"hi"}`)
 	if err != nil {
 		t.Fatalf("执行已注册工具应成功: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestToolManager(t *testing.T) {
 	}
 
 	// 执行：未注册
-	if _, err := m.ExecuteTool(engine.AgentContext{}, "nope", ""); err == nil {
+	if _, err := m.ExecuteTool(interfaces.AgentContext{}, "nope", ""); err == nil {
 		t.Fatal("执行未注册工具应返回错误")
 	}
 }
@@ -74,7 +74,7 @@ type toolWithName struct{}
 func (toolWithName) Name() string        { return "" }
 func (toolWithName) Description() string { return "" }
 func (toolWithName) Parameters() string  { return "" }
-func (toolWithName) Execute(ctx engine.AgentContext, params string) (string, error) {
+func (toolWithName) Execute(ctx interfaces.AgentContext, params string) (string, error) {
 	return "", nil
 }
 
@@ -83,7 +83,7 @@ type allowChecker struct {
 	allowed map[string]bool
 }
 
-func (c *allowChecker) Check(ctx engine.AgentContext, toolName string) error {
+func (c *allowChecker) Check(ctx interfaces.AgentContext, toolName string) error {
 	if !c.allowed[toolName] {
 		return fmt.Errorf("该租户未被授权使用工具 %q", toolName)
 	}
@@ -97,19 +97,19 @@ func TestExecuteTool_Permission(t *testing.T) {
 	}
 
 	// 场景1：未注入权限检查器 → 默认全部放行
-	if _, err := m.ExecuteTool(engine.AgentContext{}, "fake_tool", `{}`); err != nil {
+	if _, err := m.ExecuteTool(interfaces.AgentContext{}, "fake_tool", `{}`); err != nil {
 		t.Fatalf("未注入权限时放行失败: %v", err)
 	}
 
 	// 场景2：注入检查器，未授权工具 → 返回错误，且不执行
 	m.SetPermissionChecker(&allowChecker{allowed: map[string]bool{}})
-	if _, err := m.ExecuteTool(engine.AgentContext{}, "fake_tool", `{}`); err == nil {
+	if _, err := m.ExecuteTool(interfaces.AgentContext{}, "fake_tool", `{}`); err == nil {
 		t.Fatal("未授权工具应返回权限错误")
 	}
 
 	// 场景3：注入检查器，授权工具 → 正常执行
 	m.SetPermissionChecker(&allowChecker{allowed: map[string]bool{"fake_tool": true}})
-	out, err := m.ExecuteTool(engine.AgentContext{TenantID: 3}, "fake_tool", `{"q":"hi"}`)
+	out, err := m.ExecuteTool(interfaces.AgentContext{TenantID: 3}, "fake_tool", `{"q":"hi"}`)
 	if err != nil {
 		t.Fatalf("授权工具应正常执行: %v", err)
 	}

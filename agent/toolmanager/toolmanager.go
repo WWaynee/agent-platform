@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"agent-platform/agent/engine"
+	"agent-platform/agent/interfaces"
 )
 
 // ============ 工具权限校验（预留） ============
@@ -21,7 +21,7 @@ import (
 type PermissionChecker interface {
 	// Check 检查某租户是否有权限使用 toolName 工具。
 	// 允许返回 nil；禁止返回非 nil 错误（会中断工具执行）。
-	Check(ctx engine.AgentContext, toolName string) error
+	Check(ctx interfaces.AgentContext, toolName string) error
 }
 
 // ============ 工具管理器 ============
@@ -115,7 +115,7 @@ func (m *ToolManager) ListTools() []Tool {
 //       ③ 通过后调用其 Execute 返回结果。
 //
 // 后续可继续在这里统一追加日志、限流等横切逻辑。
-func (m *ToolManager) ExecuteTool(ctx engine.AgentContext, name, params string) (string, error) {
+func (m *ToolManager) ExecuteTool(ctx interfaces.AgentContext, name, params string) (string, error) {
 	// ① 先按名查找工具（共享读写锁，读取阶段用 RLock）
 	m.mu.RLock()
 	tool, ok := m.tools[name]

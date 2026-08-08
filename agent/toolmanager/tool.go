@@ -1,6 +1,6 @@
 package toolmanager
 
-import "agent-platform/agent/engine"
+import "agent-platform/agent/interfaces"
 
 // ============ 工具标准接口 ============
 
@@ -26,5 +26,5 @@ type Tool interface {
 
 	// Execute 执行本工具，入参为调用方解析出的参数（字符串），
 	// 返回执行结果（统一转成字符串，供 LLM 继续观察）。出错时返回错误。
-	Execute(ctx engine.AgentContext, params string) (string, error)
+	Execute(ctx interfaces.AgentContext, params string) (string, error)
 }
