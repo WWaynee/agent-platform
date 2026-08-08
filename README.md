@@ -155,6 +155,7 @@
 - [x] 预留工具权限校验（PermissionChecker 可注入钩子）
 - [x] 记忆接口 Memory + 内存版 InMemoryMemory（周日会话记忆前置，暂接纯内存）
 - [x] 定义 ReAct 引擎结构体
+- [x] 定义 Run 方法签名与 ReAct 流程注释（主循环周六实现）
 - [x] 定义上下文结构体
 - [x] 定义 Agent 输入输出结构体
 - [ ] 代码编译通过，依赖结构清晰

@@ -85,3 +85,31 @@ func NewReActEngine(llm LLMClient, tools *toolmanager.ToolManager, mem memory.Me
 		SystemPrompt:  systemPrompt,
 	}
 }
+
+// Run 执行一次 ReAct 调度，是引擎对外的主入口。
+// 输入一次用户提问(query)与执行上下文(ctx)，返回最终回答与过程元信息。
+//
+// 流程说明（具体实现周六【攻坚日】补齐，当前仅定义签名与结构）：
+//
+//	1. 从 Memory 读取该会话的历史对话（GetHistory(ctx.SessionID)）
+//	2. 组装给 LLM 的消息序列：
+//	   system（SystemPrompt + 可用工具列表的描述/参数Schema）+
+//	   Memory 里的历史 user/assistant 消息 +
+//	   本条用户提问
+//	3. 进入循环，最多执行 MaxIterations 轮：
+//	   a. 调用 LLMClient，生成一段输出（Thought / Action / Final Answer）
+//	   b. 解析该输出：判断是"直接回答"还是"要调用工具"
+//	   c.  直接回答 → 终止循环，作为最终 Answer 返回
+//	   d.  调用工具 → 通过 ToolManager.ExecuteTool 执行，
+//	                把执行结果(观察结果 Observe)作为新消息加回本轮上下文，继续下一轮
+//	4. 若达到 MaxIterations 仍未得出最终答案：
+//	   强制结束循环，把最后一段（无论动作或内容）作为兜底返回
+//	5. 把本轮新产生的对话（用户提问、助手回答，以及必要的工具往返）
+//	   通过 Memory.AddMessage 写回，供下一轮/下次会话延续上下文
+//
+// 返回 *AgentResponse（含 Answer、调用的工具列表 ToolCalls、元信息）。
+func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error) {
+	// TODO(周六攻坚日)：实现上述 ReAct 主循环流程。
+	// 本期只定义签名与流程注释，不写具体逻辑。
+	panic("Run 尚未实现（ReAct 主循环安排在周六攻坚日完成）")
+}
