@@ -8,6 +8,22 @@ import (
 	"agent-platform/agent/engine"
 )
 
+// ============ 工具权限校验（预留） ============
+
+// PermissionChecker 校验"当前租户/用户是否有权限使用某个工具"。
+//
+// 本期只预留接口与调用位置，不实现具体逻辑（返回 nil 即放行）。
+// 下周「权限管控」接入时，只需实现本接口并注入 ToolManager，
+// 引擎与 ToolManager 本体都无需改动。
+//
+// TODO(下一周权限管控)：具体实现应基于租户工具白名单
+// （数据库 tenant_tool_config 表）判断，无权限返回明确错误。
+type PermissionChecker interface {
+	// Check 检查某租户是否有权限使用 toolName 工具。
+	// 允许返回 nil；禁止返回非 nil 错误（会中断工具执行）。
+	Check(ctx engine.AgentContext, toolName string) error
+}
+
 // ============ 工具管理器 ============
 
 // ToolManager 是所有工具的注册中心与统一执行入口。
@@ -22,6 +38,8 @@ import (
 type ToolManager struct {
 	mu    sync.RWMutex
 	tools map[string]Tool
+	// perm 权限检查器；nil 表示未启用权限校验（默认全部放行）。
+	perm PermissionChecker
 }
 
 // NewToolManager 构造一个空的工具管理器。
@@ -29,6 +47,14 @@ func NewToolManager() *ToolManager {
 	return &ToolManager{
 		tools: make(map[string]Tool),
 	}
+}
+
+// SetPermissionChecker 注入权限检查器。
+// 可传 nil 来关闭权限校验（回到全部放行）。
+func (m *ToolManager) SetPermissionChecker(pc PermissionChecker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.perm = pc
 }
 
 // RegisterTool 注册一个工具到管理器。
@@ -85,15 +111,30 @@ func (m *ToolManager) ListTools() []Tool {
 }
 
 // ExecuteTool 统一执行指定工具。
-// 先按名查找工具，找不到返回错误；找到后调用其 Execute 返回结果。
-// 后续在这里可统一追加日志、权限校验、限流等横切逻辑。
+// 流程：① 按名查找，找不到返回错误 → ② 权限校验，无权限返回错误 →
+//       ③ 通过后调用其 Execute 返回结果。
+//
+// 后续可继续在这里统一追加日志、限流等横切逻辑。
 func (m *ToolManager) ExecuteTool(ctx engine.AgentContext, name, params string) (string, error) {
+	// ① 先按名查找工具（共享读写锁，读取阶段用 RLock）
 	m.mu.RLock()
 	tool, ok := m.tools[name]
+	pc := m.perm
 	m.mu.RUnlock()
 
 	if !ok {
 		return "", fmt.Errorf("执行工具失败：未注册的工具 %q", name)
 	}
+
+	// ② 权限校验（预留位置）：执行前检查当前租户是否有权限使用该工具。
+	//    注入的 checker 未启用（nil）时直接放行；启用后无权限 Check 返回错误即中断执行。
+	//    TODO(下周权限管控)：接入 tenant_tool_config 白名单做实际判断。
+	if pc != nil {
+		if err := pc.Check(ctx, name); err != nil {
+			return "", fmt.Errorf("执行工具失败：工具 %q 无权限：%w", name, err)
+		}
+	}
+
+	// ③ 通过校验，执行工具
 	return tool.Execute(ctx, params)
 }

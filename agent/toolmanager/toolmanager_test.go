@@ -1,6 +1,7 @@
 package toolmanager
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -75,4 +76,44 @@ func (toolWithName) Description() string { return "" }
 func (toolWithName) Parameters() string  { return "" }
 func (toolWithName) Execute(ctx engine.AgentContext, params string) (string, error) {
 	return "", nil
+}
+
+// 测试用权限检查器：只允许指定工具名的工具被调用。
+type allowChecker struct {
+	allowed map[string]bool
+}
+
+func (c *allowChecker) Check(ctx engine.AgentContext, toolName string) error {
+	if !c.allowed[toolName] {
+		return fmt.Errorf("该租户未被授权使用工具 %q", toolName)
+	}
+	return nil
+}
+
+func TestExecuteTool_Permission(t *testing.T) {
+	m := NewToolManager()
+	if err := m.RegisterTool(fakeTool{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 场景1：未注入权限检查器 → 默认全部放行
+	if _, err := m.ExecuteTool(engine.AgentContext{}, "fake_tool", `{}`); err != nil {
+		t.Fatalf("未注入权限时放行失败: %v", err)
+	}
+
+	// 场景2：注入检查器，未授权工具 → 返回错误，且不执行
+	m.SetPermissionChecker(&allowChecker{allowed: map[string]bool{}})
+	if _, err := m.ExecuteTool(engine.AgentContext{}, "fake_tool", `{}`); err == nil {
+		t.Fatal("未授权工具应返回权限错误")
+	}
+
+	// 场景3：注入检查器，授权工具 → 正常执行
+	m.SetPermissionChecker(&allowChecker{allowed: map[string]bool{"fake_tool": true}})
+	out, err := m.ExecuteTool(engine.AgentContext{TenantID: 3}, "fake_tool", `{"q":"hi"}`)
+	if err != nil {
+		t.Fatalf("授权工具应正常执行: %v", err)
+	}
+	if !strings.Contains(out, "tenant=3") {
+		t.Fatalf("执行结果应透传租户上下文, got %q", out)
+	}
 }
