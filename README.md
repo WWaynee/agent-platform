@@ -152,6 +152,8 @@
 - [x] agent 包分层：engine / memory / toolmanager
 - [x] 定义工具标准接口
 - [x] 实现工具注册机制
+- [x] 预留工具权限校验（PermissionChecker 可注入钩子）
+- [x] 记忆接口 Memory + 内存版 InMemoryMemory（周日会话记忆前置，暂接纯内存）
 - [ ] 定义 ReAct 引擎结构体
 - [x] 定义上下文结构体
 - [x] 定义 Agent 输入输出结构体
