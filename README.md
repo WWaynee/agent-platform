@@ -240,6 +240,13 @@
    → 容错候选按可修复程度依次尝试：① 原文字符串直接解析 ② 剥掉 ```json/``` 代码围栏 ③ 取第一个 `{` 到最后一个 `}` 截取。缺失 action 判定为非法；全失败返回错误（绝不 panic）。
    → 自测：标准 JSON ✅、```json围栏 ✅、前后多余文字 ✅、纯```围栏 ✅、完全乱→返回错误不 panic ✅、空串→错误不 panic ✅。
 
+15. **ReAct 主循环 Run 实现（思考→行动→观察）**：把 SystemPrompt + 解析器 + ToolManager + Memory + LLM 串成完整循环。
+   → `engine.go` 的 `Run(ctx, query)`：从 Memory 读历史 → 组装 system(角色+工具列表+格式)+历史+提问 → 循环调 LLM 得输出 → 解析；
+      final_answer 即结束；否则记录 ToolCall 并经 `ToolManager.ExecuteTool` 执行（含租户权限校验），把结果包装成 `观察结果` 喂回上下文继续下一轮。
+   → 容错：解析失败塞回纠错提示重试（最多 1 次，常量 `maxParseRetries`）；达 MaxIterations 走兜底收尾（`fallbackResponse`，不 panic，并补回 ToolCalls 审计）。
+   → 每轮 `log` 打印会话/轮次/LLM输出/工具调用，便于调试。对话（user+assistant）经 `persist` 写回 Memory。
+   → 自测（mock LLM 预设序列）：A 工具调用→观察→final_answer→存记忆 全链打通 ✅；B 首轮乱码解析失败→重试成功 ✅；C 达最大迭代强制收尾、ToolCalls 完整、不 panic ✅。`go test ./agent/...` 全绿。
+
 
 #### 周日・会话记忆 & 上下文压缩
 

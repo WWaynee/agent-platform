@@ -115,3 +115,13 @@ func extractJSONObject(s string) string {
 func ParseLLMOutput(output string) (*ParsedOutput, error) {
 	return parseLLMOutput(output)
 }
+
+// rawInputToParams 把工具传入的参数字符串转成 map，供 ToolCall 审计记录。
+// 参数通常是 JSON 对象字符串（如 `{"query":"..."}`），解析失败时降级为原始文本占位。
+func rawInputToParams(input string) map[string]any {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(input), &m); err == nil && m != nil {
+		return m
+	}
+	return map[string]any{"__raw": input}
+}

@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"log"
 
 	"agent-platform/agent/memory"
 	"agent-platform/agent/toolmanager"
@@ -33,6 +35,16 @@ type Message struct {
 }
 
 // ============ ReAct 引擎主结构体 ============
+
+// 引擎运行相关常量
+const (
+	// finalAnswerAction 预留的终止动作名：LLM 输出该 action 即表示直接回答，不再调工具。
+	finalAnswerAction = "final_answer"
+	// observeTemplate 工具执行结果的包装模板：把观察结果明确喂回给 LLM。
+	observeTemplate = "工具 %q 的执行结果（观察结果）：\n%s"
+	// maxParseRetries LLM 输出解析失败时的最大重试次数（防止无限重试）。
+	maxParseRetries = 1
+)
 
 // ReActEngine 是 ReAct（Reason + Act）调度引擎的主结构体。
 // 它本身不实现具体业务，只负责调度：让 LLM 想（Reason）→ 调工具（Act）→
@@ -89,27 +101,102 @@ func NewReActEngine(llm LLMClient, tools *toolmanager.ToolManager, mem memory.Me
 // Run 执行一次 ReAct 调度，是引擎对外的主入口。
 // 输入一次用户提问(query)与执行上下文(ctx)，返回最终回答与过程元信息。
 //
-// 流程说明（具体实现周六【攻坚日】补齐，当前仅定义签名与结构）：
-//
-//	1. 从 Memory 读取该会话的历史对话（GetHistory(ctx.SessionID)）
-//	2. 组装给 LLM 的消息序列：
-//	   system（SystemPrompt + 可用工具列表的描述/参数Schema）+
-//	   Memory 里的历史 user/assistant 消息 +
-//	   本条用户提问
-//	3. 进入循环，最多执行 MaxIterations 轮：
-//	   a. 调用 LLMClient，生成一段输出（Thought / Action / Final Answer）
-//	   b. 解析该输出：判断是"直接回答"还是"要调用工具"
-//	   c.  直接回答 → 终止循环，作为最终 Answer 返回
-//	   d.  调用工具 → 通过 ToolManager.ExecuteTool 执行，
-//	                把执行结果(观察结果 Observe)作为新消息加回本轮上下文，继续下一轮
-//	4. 若达到 MaxIterations 仍未得出最终答案：
-//	   强制结束循环，把最后一段（无论动作或内容）作为兜底返回
-//	5. 把本轮新产生的对话（用户提问、助手回答，以及必要的工具往返）
-//	   通过 Memory.AddMessage 写回，供下一轮/下次会话延续上下文
-//
-// 返回 *AgentResponse（含 Answer、调用的工具列表 ToolCalls、元信息）。
+// 核心循环（思考→行动→观察，最多 MaxIterations 轮）：
+//  1. 从 Memory 读该会话历史；组装 system(角色+工具列表+格式) + 历史 + 当前问题。
+//  2. 调 LLM 得到一段输出 → 解析为 {action, action_input}。
+//  3. final_answer → 结束；否则当工具调用执行，把结果(观察)喂回上下文继续下一轮。
+//  4. 解析失败 → 塞回纠错提示重试(最多1次)；达最大轮次 → 强制兜底收尾。
+//  5. 把本次 user 提问与 assistant 回答写回 Memory。
 func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error) {
-	// TODO(周六攻坚日)：实现上述 ReAct 主循环流程。
-	// 本期只定义签名与流程注释，不写具体逻辑。
-	panic("Run 尚未实现（ReAct 主循环安排在周六攻坚日完成）")
+	// 1. 从 Memory 读取该会话历史（正序）
+	history := e.Memory.GetHistory(ctx.SessionID)
+
+	// 2. 组装消息序列：system + 历史 + 当前问题
+	msgs := e.buildInitialMessages(ctx, history, query)
+
+	var calls []ToolCall
+	var lastRaw string // 记录 LLM 最后一次原始输出（兜底用）
+	parseRetry := 0    // 解析失败重试次数（最多 1 次）
+
+	// 3/4. ReAct 主循环
+	for iter := 0; iter < e.MaxIterations; iter++ {
+		log.Printf("[ReAct] 会话=%s 第 %d/%d 轮", ctx.SessionID, iter+1, e.MaxIterations)
+
+		// a. 调 LLM 生成下一步输出（想）
+		raw, err := e.LLMClient.Chat(context.Background(), ChatRequest{Messages: msgs})
+		if err != nil {
+			return nil, fmt.Errorf("调用 LLM 失败: %w", err)
+		}
+		lastRaw = raw
+		log.Printf("[ReAct] LLM 输出: %.180s", raw)
+
+		// b/c. 解析 LLM 输出（是否 final_answer 还是工具调用）
+		parsed, perr := parseLLMOutput(raw)
+		if perr != nil {
+			// d. 解析失败：给 LLM 塞回纠错提示，本轮重试（最多 1 次）
+			if parseRetry < maxParseRetries {
+				parseRetry++
+				hint := fmt.Sprintf("你刚才的输出无法被系统解析成合法的 {action, action_input} 动作，请严格按格式重新输出单条 JSON，不要夹杂其他文字。解析错误: %v", perr)
+				msgs = append(msgs, Message{Role: "system", Content: hint})
+				continue
+			}
+			// 重试用尽：强制结束，走兜底
+			break
+		}
+
+		// e. final_answer → 结束循环，返回答案
+		if parsed.Action == finalAnswerAction {
+			e.persist(ctx, query, parsed.Input)
+			return &AgentResponse{Answer: parsed.Input, ToolCalls: calls}, nil
+		}
+
+		// f/g. 工具调用：记录审计 + 经 ToolManager 统一执行（含租户权限校验）
+		calls = append(calls, ToolCall{ToolName: parsed.Action, Params: rawInputToParams(parsed.Input)})
+		out, terr := e.ToolManager.ExecuteTool(ctx, parsed.Action, parsed.Input)
+		if terr != nil {
+			out = fmt.Sprintf("工具 %q 执行失败: %v", parsed.Action, terr)
+		}
+		log.Printf("[ReAct] 调用工具 %s 完成", parsed.Action)
+
+		// h. 把"这次的决策 + 观察结果"追加进上下文，供下一轮继续思考
+		msgs = append(msgs,
+			Message{Role: "assistant", Content: raw},
+			Message{Role: "tool", Content: fmt.Sprintf(observeTemplate, parsed.Action, out)},
+		)
+	}
+
+	// 5. 达到最大迭代：强制结束，返回最后一次内容（兜底收尾）
+	resp := e.fallbackResponse(lastRaw)
+	resp.ToolCalls = calls // 兜底响应也需要附带本轮工具调用记录，避免丢失审计信息
+	e.persist(ctx, query, resp.Answer)
+	return resp, nil
+}
+
+// buildInitialMessages 组装首轮消息序列：system(角色+工具列表+格式) + 历史 + 当前提问。
+func (e *ReActEngine) buildInitialMessages(ctx AgentContext, history []memory.ChatMessage, query string) []Message {
+	tools := e.ToolManager.ListTools() // 实时取工具列表，保证 Prompt 描述与实际可用一致
+	msgs := []Message{systemMessageFor(e.SystemPrompt, tools)}
+
+	for _, h := range history {
+		msgs = append(msgs, Message{Role: string(h.Role), Content: h.Content})
+	}
+	msgs = append(msgs, Message{Role: "user", Content: query})
+	return msgs
+}
+
+// persist 把本次的 user 提问与 assistant 回答写回 Memory，延续会话上下文。
+func (e *ReActEngine) persist(ctx AgentContext, query, answer string) {
+	e.Memory.AddMessage(ctx.SessionID, memory.ChatMessage{Role: memory.RoleUser, Content: query})
+	e.Memory.AddMessage(ctx.SessionID, memory.ChatMessage{Role: memory.RoleAssistant, Content: answer})
+}
+
+// fallbackResponse 最大迭代终止时的兜底响应：能解析出 final_answer 就用它，
+// 否则返回最后一次 LLM 原始输出，并提示可能未收敛。
+func (e *ReActEngine) fallbackResponse(lastRaw string) *AgentResponse {
+	if ps, err := parseLLMOutput(lastRaw); err == nil && ps.Action == finalAnswerAction {
+		return &AgentResponse{Answer: ps.Input}
+	}
+	return &AgentResponse{
+		Answer: fmt.Sprintf("我已尝试最多 %d 轮仍未收敛到确定答案，请换个问法或补充信息。最后一步模型输出：%s", e.MaxIterations, lastRaw),
+	}
 }
