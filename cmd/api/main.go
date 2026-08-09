@@ -3,10 +3,14 @@ package main
 import (
 	"fmt"
 	"log"
+	"strings"
 
+	"agent-platform/agent/toolmanager"
 	"agent-platform/api"
+	"agent-platform/api/service"
 	"agent-platform/config"
 	"agent-platform/storage"
+	"agent-platform/toolkit"
 )
 
 func main() {
@@ -45,10 +49,25 @@ func main() {
 	}
 	log.Println("✅ Qdrant 连接成功")
 
-	// 6. 初始化 Gin 引擎（含全局中间件与路由）
+	// 6. 初始化工具管理器：注册知识库检索工具 + 注入基于 DB 的工具权限校验
+	tm := toolmanager.NewToolManager()
+	if err := tm.RegisterTool(toolkit.NewKnowledgeRetrieveTool()); err != nil {
+		log.Fatalf("注册知识库检索工具失败: %v", err)
+	}
+	// 注入 tenant_tool_config 白名单权限校验（未显式开启的工具会被拦截）
+	tm.SetPermissionChecker(service.NewDBPermissionChecker())
+	{
+		names := make([]string, 0, len(tm.ListTools()))
+		for _, t := range tm.ListTools() {
+			names = append(names, t.Name())
+		}
+		log.Printf("✅ 工具管理器就绪，已注册 %d 个工具: [%s]", len(names), strings.Join(names, ", "))
+	}
+
+	// 7. 初始化 Gin 引擎（含全局中间件与路由）
 	router := api.NewRouter()
 
-	// 6. 启动 HTTP 服务，监听配置里的端口
+	// 8. 启动 HTTP 服务，监听配置里的端口
 	addr := fmt.Sprintf(":%d", cfg.Server.HTTPPort)
 	log.Printf("🚀 服务启动，监听 %s", addr)
 	if err := router.Run(addr); err != nil {

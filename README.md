@@ -224,6 +224,12 @@
      - `Execute(ctx, params)`：解析 query → 用 `ctx.TenantID` 调 `service.Search`（隔离底线仍在 storage 层）→ 拼接片段成文本返回
    → 自测：编译期断言实现 Tool 接口；注册到 ToolManager 可查可调；单独 Execute 传 `{"query":"篮球规则"}` 返回对应知识片段；空 query / 非法 JSON 返回明确错误，不 panic。
 
+12. **工具注册 + 工具权限校验（补周五 TODO）**：程序启动时注册 KnowledgeRetrieveTool 到 ToolManager；补上 ExecuteTool 预留的权限校验（tenant_tool_config 白名单）。
+   → 启动注册：`cmd/api/main.go` 建 ToolManager → `RegisterTool(NewKnowledgeRetrieveTool())` → `SetPermissionChecker(service.NewDBPermissionChecker())`，日志确认"已注册 1 个工具: [knowledge_retrieve]"。
+   → 权限校验：新增 `storage/tool_config.go`（GetToolConfig / SetToolConfig 的 upsert）+ `api/service/tool_permission.go`（`DBPermissionChecker` 实现 `toolmanager.PermissionChecker`）。规则：查到 IsEnable=false → 拒绝；查不到记录 → 知识库工具在 `DefaultEnabledTools` 里默认放行。
+   → 自测：关闭租户 9988 的 knowledge_retrieve → ExecuteTool 返回"无权限"；开启 → 正常调用。
+   ⚠️ **踩坑记录（bool 默认值）**：`TenantToolConfig.IsEnable` 若带 `gorm:"default:true"` 标签，会因 **bool 零值(false)被 gorm 当"未赋值"而替换成列默认值 true**，导致"关闭"操作写入后实际仍是开启、权限校验失效。已去掉该标签修复。教训：bool 开关字段的 gorm default 标签要格外小心。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -378,7 +384,8 @@ agent-platform/
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
-│   │   └── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
+│   │   ├── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
+│   │   └── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单，默认开启知识库工具）
 │   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / context
 │   ├── response/              #   统一返回格式与错误码工具
 │   └── .gitkeep
@@ -390,6 +397,8 @@ agent-platform/
 │   ├── qdrant.go              #   Qdrant 向量库封装：批量入库 UpsertVectors + 多租户检索 SearchVectors
 │   ├── model/models.go        #   GORM 模型（7 张核心表的实体定义）
 │   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
+│   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）
+│   └── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / SetToolConfig upsert）
 │   └── document.go            #   文档元信息的数据库操作
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
