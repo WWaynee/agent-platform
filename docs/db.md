@@ -32,6 +32,7 @@ CREATE TABLE `documents` (
   `name` varchar(256) NOT NULL,
   `minio_object_key` varchar(512) NOT NULL,
   `status` varchar(32) NOT NULL COMMENT 'pending/processing/success/fail',
+  `error_msg` text COMMENT '失败原因（仅 failed 状态时记录）',
   `size` bigint DEFAULT NULL,
   `created_at` datetime(3) DEFAULT NULL,
   `updated_at` datetime(3) DEFAULT NULL,

@@ -163,17 +163,38 @@
 
 #### 周六・RAG 链路 & ReAct 引擎【攻坚日】
 
-- [ ] 实现文档文本切片逻辑
-- [ ] 切片后调用 Embedding 生成向量
-- [ ] 封装 Qdrant SDK，向量写入
-- [ ] 向量写入时携带 tenant_id 元数据
-- [ ] 实现向量检索接口，强制 tenant_id 过滤
-- [ ] 测试：上传文档 → 切片 → 向量入库
-- [ ] 测试：租户 A 检索不到租户 B 的文档
+- [x] 实现文档文本切片逻辑
+- [x] 切片后调用 Embedding 生成向量
+- [x] 封装 Qdrant SDK，向量写入
+- [x] 向量写入时携带 tenant_id 元数据
+- [x] 实现向量检索接口，强制 tenant_id 过滤
+- [x] 测试：上传文档 → 切片 → 向量入库
+- [x] 测试：租户 A 检索不到租户 B 的文档
 - [ ] 实现完整 ReAct 循环调度引擎
 - [ ] 开发知识库检索工具
 - [ ] 测试：提问文档内容，Agent 自动调用 RAG
 - [ ] 测试：无关问题，Agent 不调用工具直接回答
+
+#### 📌 周六遇到的问题与解决方案
+
+1. **切片策略与重叠**：纯按字符硬切会正好在句子中间断开，相邻两端语义都不完整，检索时难以命中完整上下文。
+   → 解决：`splitter` 包定义 **ChunkSize=600 / OverlapSize=80** 策略常量；`SplitText` 按「段落优先 + 超长回找分隔点 + 相邻切片保留 OverlapSize 重叠」切分，保证被切断的语义在至少一个切片里连续。用 `[]rune` 处理长度，中文不会切成半个字。
+
+2. **Embedding 只能单条调用，切片多会非常慢**：原 `llmclient.Embed` 每次只转一条文本，文档切出几十片就得几十次 HTTP 往返。
+   → 解决：新增 **`EmbedBatch`**（输入 `[]string`，OpenAI 兼容接口 input 传数组一次返回全部向量），`ProcessDocument` 以 `embedBatchSize=16` 分批批量向量化，写入也走 `UpsertVectors` 一次批量 upsert，显著减少往返。
+
+3. **documents 表缺 `error_msg` 列**：`UpdateDocumentResult` 想记录失败原因，但表一直没建这列，首次调用直接报 `Unknown column`。
+   → 解决：迁移工具/手工 `ALTER TABLE documents ADD COLUMN error_msg TEXT` 补齐，使"失败时记录原因、成功时清空"真正落地。
+
+4. **向量点 ID 冲突与幂等**：不同文档、不同切片若 ID 撞车会互相覆盖；重跑向量化又可能产生重复点。
+   → 解决：点 ID 用 `(documentID << 32) | chunkIndex` 合成高 32 位文档号 + 低 32 位切片号 —— 跨文档必不冲突；同一文档重跑时同一切片 ID 相同 → upsert 覆盖，天然幂等。
+
+5. **同步执行时 processing 态瞬时被覆盖**：测试接口同步调用，从 pending 直接到 success，中间 processing 态几乎不可见。
+   → 解决：`ProcessDocument` 在查到文档后立即显式 `UpdateDocumentStatus("processing")`；实测用多切片长文档 + 高频轮询能捕获到 processing 态（持续约数百 ms），证明三态流转真实发生。MQ 异步化后该态供前端轮询。
+
+6. **MinIO 缺「下载读回」方法**：原封装只有 `UploadFile/GetFileURL/DeleteFile`，不能把对象内容读回内存。
+   → 解决：新增 `DownloadFile(objectKey) ([]byte, error)`，用 `GetObject` 流式读完对象，`ReadTextDocument` 据此把 txt/md 读为 UTF-8 文本（PDF 暂不支持，返回明确错误）。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -326,6 +347,8 @@ agent-platform/
 │   ├── router.go              #   路由注册：公开组（health/注册/登录）与私有组（JWT 鉴权）
 │   ├── handler/               #   处理器：tenant.go / user.go / document.go（绑定参数、调 service）
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
+│   │   └── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
+│   │                          #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
 │   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / context
 │   ├── response/              #   统一返回格式与错误码工具
 │   └── .gitkeep
@@ -333,14 +356,19 @@ agent-platform/
 ├── storage/                   # 数据持久化层
 │   ├── init.go                #   Redis 客户端初始化
 │   ├── mysql.go               #   MySQL 初始化（GORM）
-│   ├── minio.go               #   MinIO SDK 封装 + 初始化：Upload/GetURL/Delete
+│   ├── minio.go               #   MinIO SDK 封装 + 初始化：Upload/Download/GetURL/Delete
+│   ├── qdrant.go              #   Qdrant 向量库封装：批量入库 UpsertVectors + 多租户检索 SearchVectors
 │   ├── model/models.go        #   GORM 模型（7 张核心表的实体定义）
 │   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
 │   └── document.go            #   文档元信息的数据库操作
 │
+├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
+│   └── splitter.go
+│
 ├── llmclient/                 # 大模型客户端（OpenAI 兼容接口）
-│   ├── types.go               #   统一数据结构：Chat/Embedding 请求响应、角色、token 用量
-│   └── client.go              #   Client 接口 + OpenAIClient 实现：超时/退避重试/多厂商
+│   ├── types.go               #   统一数据结构：Chat/Embedding(含Batch)/响应、角色、token 用量
+│   └── client.go              #   Client 接口 + OpenAIClient 实现：超时/退避重试/多厂商/熔断/
+│                               #   ChatWithJSON 结构化输出；Embed / EmbedBatch 向量生成
 │
 ├── util/                      # 通用工具
 │   ├── jwt.go                 #   JWT 生成与解析（载荷最小化：user_id/tenant_id/role）
@@ -370,14 +398,16 @@ agent-platform/
 ### 分层依赖关系
 
 ```text
-cmd/(api...)  →  api/(handler → service)  →  storage/(MySQL/MinIO/Redis)
+cmd/(api...)  →  api/(handler → service)  →  storage/(MySQL/MinIO/Redis/Qdrant)
                           ↘  ↓                ↘  config/(全局配置)
-                     llmclient/(Chat/Embedding)   ↑
+                     llmclient/(Chat/Embedding/Batch)  ↑
                           ↘  ↓                ┌── util/(JWT/密码)
-                     agent/ · toolkit/ · mq/  └── 未来 RAG：Qdrant
+                     splitter/(文档切片)      └── qdrant.go(向量入库/多租户检索)
+                             ↑  ↓
+                     api/service/document_parse.go(ProcessDocument 编排)
 ```
 
-> 核心原则：**业务层只依赖 `llmclient.Client` 接口与 `storage` 层**，不直接触碰厂商 SDK / DB 细节，便于换厂商、换存储。
+> 核心原则：**业务层只依赖 `llmclient.Client` 接口与 `storage` 层**，不直接触碰厂商 SDK / DB 细节，便于换厂商、换存储。RAG 链路（切片 → Embedding → Qdrant 向量入库与多租户检索）已打通。
 
 ## ⚠️ 上线前需调整 / 调试期产物清单
 
