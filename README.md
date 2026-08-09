@@ -204,6 +204,12 @@
    → 解决：新增 `api/service/knowledge.go` 的 `Search(tenantID, query, topK) ([]SearchHit, error)`：query 先 Embedding 转向量，再调 `storage.SearchVectors`。**隔离底线在 storage 死守**——`SearchVectors` 的签名强制 `tenantID uint64` 参数（不传编译不过），函数内部用 `tenantIDFilter` 构造 `tenant_id` 等值过滤，业务层传错也被过滤兜住。
    → 自测（带 tenant_id 逐条核对命中点）：租户 9988 / 1 / 2 各检索，命中的每一条 `tenant_id` 都等于发起检索的租户，**零跨租户泄漏**。topK≤0 自动取默认 3。
 
+9. **知识库检索测试接口（HTTP）**：`service.Search` 是内部方法，调试/联调需要一个能传 query 返回片段的 HTTP 入口。
+   → 解决：新增 `POST /api/knowledge/search`（私有组，JWT 鉴权），请求 `{"query":"问题","top_k":3}`，tenant_id 从 JWT 上下文取，返回 `results[]`（content/score/document_id/chunk_index）。
+   → 自测：上传多主题长文档（篮球/咖啡/海洋各成片段）→ 向量化 → 分别检索"篮球走步二次运球""咖啡豆品种拉花"→ **top 结果全部命中对应主题片段**，证明结果与问题相关；租户 1 / 9988 各自只见自己的向量点（HTTP 层隔离生效）。
+   → 健壮性：空 query / 缺字段 / 非法 JSON → 400；无 token → 401，服务不崩。
+   ⚠️ 结论：检索接口 + 多租户隔离链路（上传→切片→向量化→检索）全链路已打通且可调试。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -354,7 +360,7 @@ agent-platform/
 │
 ├── api/                       # HTTP 接口层（Gin）
 │   ├── router.go              #   路由注册：公开组（health/注册/登录）与私有组（JWT 鉴权）
-│   ├── handler/               #   处理器：tenant.go / user.go / document.go（绑定参数、调 service）
+│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）

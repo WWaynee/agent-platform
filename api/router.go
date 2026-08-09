@@ -52,6 +52,9 @@ func NewRouter() *gin.Engine {
 		// 文档向量化触发（测试/调试接口，同步执行，触发切片→Embedding→写入Qdrant）
 		private.POST("/document/:id/process", handler.ProcessDocument)
 
+		// 知识库检索（测试/调试接口，按当前租户强制过滤检索文档片段）
+		private.POST("/knowledge/search", handler.KnowledgeSearch)
+
 		// 租户管理（创建/查询租户都需登录）
 		private.POST("/tenant", handler.CreateTenant)                 // 创建租户
 		private.GET("/tenant/list", handler.ListTenants)              // 租户列表
