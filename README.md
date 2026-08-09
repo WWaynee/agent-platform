@@ -216,6 +216,14 @@
    → 双向验证通过 ✅：A 搜自己能搜到、B 搜 A 独有内容搜不到。隔离无硬伤。
    → 原理复盘：写入时 `QdrantVector.TenantID` 从 JWT 取并写进 payload；检索时 `SearchVectors` 签名强制 `tenantID` 参数，函数内部用 `tenantIDFilter` 构造 `tenant_id` 等值过滤——即使上层传错，filter 也是正确构造的，杜绝跨租户泄漏。
 
+11. **知识库检索工具 KnowledgeRetrieveTool**：把 RAG 检索封装成 Agent 可调用的工具，供 ReAct 引擎检索企业私有知识。
+   → `toolkit/knowledge_retrieve.go` 实现 `toolmanager.Tool` 接口四方法：
+     - `Name()` = `knowledge_retrieve`
+     - `Description()` 明确「何时用 / 参数 / 返回」：涉及内部资料、公司规定、产品说明等私有知识且需事实依据时用；返回最相关片段及其来源
+     - `Parameters()` = JSON Schema（必填 `query`）
+     - `Execute(ctx, params)`：解析 query → 用 `ctx.TenantID` 调 `service.Search`（隔离底线仍在 storage 层）→ 拼接片段成文本返回
+   → 自测：编译期断言实现 Tool 接口；注册到 ToolManager 可查可调；单独 Execute 传 `{"query":"篮球规则"}` 返回对应知识片段；空 query / 非法 JSON 返回明确错误，不 panic。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -405,8 +413,9 @@ agent-platform/
 │   └── .gitkeep
 ├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
 │   └── .gitkeep
-├── toolkit/                   # （预留）可插拔工具集（Agent 调用能力注入）
-│   └── .gitkeep
+├── toolkit/                    # 可插拔工具集（Agent 调用能力注入）
+│   ├── echo_tool.go            #   Echo 测试工具（骨架链路验证）
+│   └── knowledge_retrieve.go   #   知识库检索工具（RAG 核心，调 service.Search，按 ctx.TenantID 隔离）
 ├── observability/             # （预留）可观测体系（TraceID / 指标 / 审计，第二周周四）
 │   └── .gitkeep
 │
