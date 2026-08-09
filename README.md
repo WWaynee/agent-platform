@@ -230,6 +230,11 @@
    → 自测：关闭租户 9988 的 knowledge_retrieve → ExecuteTool 返回"无权限"；开启 → 正常调用。
    ⚠️ **踩坑记录（bool 默认值）**：`TenantToolConfig.IsEnable` 若带 `gorm:"default:true"` 标签，会因 **bool 零值(false)被 gorm 当"未赋值"而替换成列默认值 true**，导致"关闭"操作写入后实际仍是开启、权限校验失效。已去掉该标签修复。教训：bool 开关字段的 gorm default 标签要格外小心。
 
+13. **System Prompt 模板（ReAct 循环的灵魂）**：LLM 完全靠 Prompt 判断"要不要调工具、按什么格式调、何时直接答"，模板质量直接决定 ReAct 能否工作。
+   → `agent/engine/prompt.go` 的 `BuildSystemPrompt(systemRole, tools)` 从 ToolManager 实时取工具列表动态拼装，保证"Prompt 描述的工具 == 实际可用的工具"，避免诱导 LLM 调不存在的工具。
+   → 模板五大段：① 角色设定 ② 可用工具列表（Name + Description + JSONSchema）③ 输出格式要求（`{"action", "action_input"}` / `final_answer`）④ 正例 ⑤ 规则（一次一条 JSON、只能用列出的工具、不知道就说不知道勿编造）。
+   → 自测：含 knowledge_retrieve/echo 工具列表、参数 Schema、action 格式、final_answer、示例、规则，全部核验通过。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -416,8 +421,12 @@ agent-platform/
 ├── docs/
 │   └── db.md                  # 7 张核心数据表设计文档（字段 / 索引 / 关系）
 │
-├── agent/                     # （预留）自研 Agent 引擎（ReAct 骨架，周五）
-│   └── .gitkeep
+├── agent/                       # 自研 Agent 引擎（ReAct 骨架，周五起）
+│   ├── interfaces/interfaces.go #   AgentContext（多租户/会话上下文，下沉避免循环依赖）
+│   ├── engine/                  #   ReAct 引擎：engine.go(主循环) / prompt.go(SystemPrompt模板) / types.go
+│   ├── toolmanager/             #   工具注册中心 + PermissionChecker 接口
+│   ├── toolkit/                 #   可插拔工具实现（echo 测试 / knowledge_retrieve）
+│   └── memory/                  #   会话记忆（inmemory 当前）
 ├── mq/                        # （预留）消息队列封装（异步任务，第二周周一）
 │   └── .gitkeep
 ├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
