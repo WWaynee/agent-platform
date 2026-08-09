@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -179,7 +180,12 @@ func ProcessDocument(c *gin.Context) {
 	}
 
 	if err := service.ProcessDocument(tenantID, id); err != nil {
-		// 向量化失败：把错误信息返回给调用方（文档状态已在 service 层置为 failed）
+		// 文档不存在/跨租户访问：属于"资源不存在"，返回 400 而非 500
+		if errors.Is(err, service.ErrDocumentNotFound) {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		// 向量化过程真实失败（文件/Embedding/写库）：返回 500，文档状态已在 service 层置为 failed
 		response.ServerError(c, err.Error())
 		return
 	}

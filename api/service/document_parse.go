@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"agent-platform/llmclient"
 	"agent-platform/splitter"
 	"agent-platform/storage"
+
+	"gorm.io/gorm"
 )
 
 // ============ Service 层：文档文本切片（Chunking） ============
@@ -166,6 +169,10 @@ func ReadTextDocument(minioKey, filename string) (string, error) {
 // 批量请求比逐条请求省大量 HTTP 往返；取 16 平衡单次请求体大小与并发效率。
 const embedBatchSize = 16
 
+// ErrDocumentNotFound 文档不存在或不属于当前租户时的哨兵错误。
+// handler 层可用 errors.Is 识别它，对"资源不存在"返回 4xx 而非 5xx。
+var ErrDocumentNotFound = errors.New("文档不存在或无权访问")
+
 // ProcessDocument 文档向量化主流程：上传的文档 → 切块 → 向量化 → 写入 Qdrant。
 //
 // 完整流程（任务给出的编排）：
@@ -177,9 +184,11 @@ const embedBatchSize = 16
 //  6. 更新 document 状态为 success
 //
 // ⚠️ 状态流转（任务要求）：
-//   - 步骤 1 后立即置为 processing（标记开始处理，供前端轮询/观察）
+//   - 步骤 1.5 后立即置为 processing（标记开始处理，供前端轮询/观察）
 //   - 任一环节出错 → 改为 failed，并把错误信息记录到文档的 error_msg 字段
 //   - 成功 → success，error_msg 清空
+//   - 文档不存在（第 1 步就查不到）→ 直接返回 ErrDocumentNotFound，不置 failed
+//     （文档本身不存在，置 failed 无意义且误导排查）
 //
 // ⚠️ 多租户安全：整个流程只按 tenantID + documentID 操作，写入 Qdrant 的点
 // 都携带 tenant_id（QdrantVector.TenantID），保证检索时按租户隔离。
@@ -190,10 +199,16 @@ func ProcessDocument(tenantID, documentID uint64) error {
 	// 1. 查文档，拿 MinIO object key
 	doc, err := storage.GetDocumentByID(tenantID, documentID)
 	if err != nil {
+		// 文档不存在（或不属于当前租户）：直接返回哨兵错误，不尝试置 failed。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrDocumentNotFound
+		}
+		// 其他数据库异常：正常走失败处理，置 failed 并记录原因
 		return failProcess(documentID, fmt.Errorf("查询文档失败: %w", err))
 	}
 
 	// 1.5 标记正在处理（processing），供前端轮询状态
+	// 从此刻起若后续任何一步失败，都会把状态覆盖为 failed 并记录原因
 	if err := storage.UpdateDocumentStatus(documentID, "processing"); err != nil {
 		return failProcess(documentID, fmt.Errorf("更新文档为处理中失败: %w", err))
 	}
@@ -225,6 +240,11 @@ func ProcessDocument(tenantID, documentID uint64) error {
 		resp, err := llm.EmbedBatch(ctx, llmclient.EmbeddingBatchRequest{Inputs: batch})
 		if err != nil {
 			return failProcess(documentID, fmt.Errorf("批量向量化切片[%d:%d]失败: %w", start, end, err))
+		}
+		// 防御：返回向量数量必须等于本批切片数，否则向量与切片对不上，写入会错位
+		if len(resp.Vectors) != len(batch) {
+			return failProcess(documentID, fmt.Errorf(
+				"批量向量化切片[%d:%d]数量不符: 请求 %d 条，返回 %d 条", start, end, len(batch), len(resp.Vectors)))
 		}
 		copy(vectors[start:end], resp.Vectors)
 	}

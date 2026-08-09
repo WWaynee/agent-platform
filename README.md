@@ -195,6 +195,11 @@
 6. **MinIO 缺「下载读回」方法**：原封装只有 `UploadFile/GetFileURL/DeleteFile`，不能把对象内容读回内存。
    → 解决：新增 `DownloadFile(objectKey) ([]byte, error)`，用 `GetObject` 流式读完对象，`ReadTextDocument` 据此把 txt/md 读为 UTF-8 文本（PDF 暂不支持，返回明确错误）。
 
+7. **向量化流程的异常处理闭环**：ProcessDocument 任一环节失败（文件/读取/Embedding/写库）都必须落 failed + error_msg，且服务不 panic。
+   → 解决：所有失败步骤统一走 `failProcess`（落 failed + 记录原因）；EmbedBatch 返回数量与请求不符时防御性拦截，防止向量与切片错位。
+   → 边界：**文档不存在**时直接返回哨兵错误 `ErrDocumentNotFound`，handler 用 errors.Is 识别后返回 400，**不置 failed**（文档本身不存在，置 failed 无意义且误导排查）。
+   → 自测：故意传不存在文档 ID → 返回 400"文档不存在或无权访问"，服务不崩；故意把 Embedding key 写错 → 文档状态置 failed、error_msg 完整记录 API 返回的错误，服务不崩。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
