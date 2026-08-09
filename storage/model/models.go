@@ -38,6 +38,7 @@ type Document struct {
 	Name           string `gorm:"size:256;not null;comment:文档名称"`
 	MinioObjectKey string `gorm:"size:512;not null;comment:minio存储key"`
 	Status         string `gorm:"size:32;not null;comment:pending/processing/success/fail"`
+	ErrorMsg       string `gorm:"type:text;comment:失败原因（仅 failed 状态时记录）"`
 	Size           int64  `gorm:"comment:文件字节大小"`
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

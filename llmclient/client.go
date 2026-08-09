@@ -30,6 +30,8 @@ type Client interface {
 	ChatWithJSON(ctx context.Context, req ChatRequest, target interface{}) error
 	// Embed 将文本转为向量（用于 RAG 检索）
 	Embed(ctx context.Context, req EmbeddingRequest) (*EmbeddingResponse, error)
+	// EmbedBatch 批量将多条文本转为向量，一次请求返回所有向量（RAG 切片向量化用）
+	EmbedBatch(ctx context.Context, req EmbeddingBatchRequest) (*EmbeddingBatchResponse, error)
 }
 
 // ============ OpenAI 兼容实现 ============
@@ -423,6 +425,79 @@ func (c *OpenAIClient) embedEndpoint() (baseURL, apiKey string) {
 		apiKey = c.cfg.APIKey
 	}
 	return baseURL, apiKey
+}
+
+// openaiEmbedBatchReq 批量向量请求体（input 传数组，一次请求多条）
+type openaiEmbedBatchReq struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+// EmbedBatch 批量向量生成：一次请求为多条文本生成向量。
+// 返回的 Vectors 与 req.Inputs 一一对应。
+//
+// OpenAI 兼容 /embeddings 接口支持 input 传字符串数组，一次返回所有 embedding。
+// 文档切片向量化场景用它替代逐条调用，显著减少 HTTP 往返与耗时。
+func (c *OpenAIClient) EmbedBatch(ctx context.Context, req EmbeddingBatchRequest) (*EmbeddingBatchResponse, error) {
+	if len(req.Inputs) == 0 {
+		return &EmbeddingBatchResponse{Vectors: [][]float32{}, Usage: TokenUsage{}}, nil
+	}
+
+	body := openaiEmbedBatchReq{
+		Model: c.cfg.EmbeddingModel,
+		Input: req.Inputs,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+
+	baseURL, apiKey := c.embedEndpoint()
+	model := c.cfg.EmbeddingModel
+	url := baseURL + "/embeddings"
+	start := time.Now()
+	respBytes, err := c.doPost(ctx, url, apiKey, payload)
+	if err != nil {
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationEmbed, Model: model,
+			Success: false, Duration: time.Since(start), Error: err,
+		})
+		return nil, err
+	}
+
+	// 复用单条响应的解析结构（Data[].Embedding）
+	var resp openaiEmbedResp
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		perr := fmt.Errorf("解析响应失败: %w", err)
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationEmbed, Model: model,
+			Success: false, Duration: time.Since(start), Error: perr,
+		})
+		return nil, perr
+	}
+	if len(resp.Data) != len(req.Inputs) {
+		perr := fmt.Errorf("批量向量数量不符: 期望 %d 条，实际返回 %d 条", len(req.Inputs), len(resp.Data))
+		c.reportUsage(ctx, UsageEvent{
+			Ctx: ctx, Operation: OperationEmbed, Model: model,
+			Success: false, Duration: time.Since(start), Error: perr,
+		})
+		return nil, perr
+	}
+
+	vectors := make([][]float32, len(resp.Data))
+	for i, d := range resp.Data {
+		vectors[i] = d.Embedding
+	}
+
+	usage := TokenUsage{
+		PromptTokens: resp.Usage.PromptTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+	}
+	c.reportUsage(ctx, UsageEvent{
+		Ctx: ctx, Operation: OperationEmbed, Model: model,
+		Tokens: usage, Success: true, Duration: time.Since(start),
+	})
+	return &EmbeddingBatchResponse{Vectors: vectors, Usage: usage}, nil
 }
 
 // ============ 容错封装：错误分类 + 指数退避重试 ============

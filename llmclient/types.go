@@ -35,6 +35,12 @@ type EmbeddingRequest struct {
 	Input string `json:"input"` // 输入文本
 }
 
+// EmbeddingBatchRequest 批量向量生成请求
+// 输入多条文本，一次请求返回每条的向量（文档切片向量化用，减少 HTTP 往返）
+type EmbeddingBatchRequest struct {
+	Inputs []string `json:"inputs"` // 多条输入文本
+}
+
 // ============ Token 用量 ============
 
 // TokenUsage token 用量统计
@@ -57,4 +63,10 @@ type ChatResponse struct {
 type EmbeddingResponse struct {
 	Vector []float32  // 输入文本的向量表示（维度由模型决定）
 	Usage  TokenUsage // token 用量统计
+}
+
+// EmbeddingBatchResponse 批量向量生成响应
+type EmbeddingBatchResponse struct {
+	Vectors [][]float32 // 与输入 inputs 一一对应的向量列表
+	Usage   TokenUsage  // token 用量统计
 }

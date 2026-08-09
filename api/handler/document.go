@@ -156,3 +156,38 @@ func DeleteDocument(c *gin.Context) {
 
 	response.Success(c, nil)
 }
+
+// ProcessDocument 触发文档向量化（测试/调试接口）
+// 路径参数：id（文档 ID）
+//
+// ⚠️ 当前为同步执行：接口返回时即向量化完成（或失败）。
+// 暂不引入 MQ 异步队列（下周再加）——今天目标是把 RAG 链路打通，
+// 同步调用便于调试排查。调用方拿到 success/failed 状态即知结果。
+//
+// 多租户安全：tenant_id 从 JWT 上下文拿，强制过滤；只能处理当前租户的文档。
+func ProcessDocument(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "无效的文档 ID")
+		return
+	}
+
+	tenantID := middleware.GetTenantID(c)
+	if tenantID == 0 {
+		response.Unauthorized(c, "未获取到租户信息")
+		return
+	}
+
+	if err := service.ProcessDocument(tenantID, id); err != nil {
+		// 向量化失败：把错误信息返回给调用方（文档状态已在 service 层置为 failed）
+		response.ServerError(c, err.Error())
+		return
+	}
+
+	response.Success(c, gin.H{
+		"id":        id,
+		"status":    "success",
+		"message":   "文档向量化完成",
+		"tenant_id": tenantID,
+	})
+}

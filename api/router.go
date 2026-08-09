@@ -49,6 +49,8 @@ func NewRouter() *gin.Engine {
 		private.GET("/document/:id", handler.GetDocumentDetail)
 		// 文档删除（需登录，强制 tenant_id 过滤，删MinIO+软删DB）
 		private.DELETE("/document/:id", handler.DeleteDocument)
+		// 文档向量化触发（测试/调试接口，同步执行，触发切片→Embedding→写入Qdrant）
+		private.POST("/document/:id/process", handler.ProcessDocument)
 
 		// 租户管理（创建/查询租户都需登录）
 		private.POST("/tenant", handler.CreateTenant)                 // 创建租户

@@ -68,10 +68,27 @@ func DeleteDocument(tenantID, id uint64) error {
 	return DB.Where("id = ? AND tenant_id = ?", id, tenantID).Delete(&model.Document{}).Error
 }
 
-// UpdateDocumentStatus 更新文档状态
+// UpdateDocumentStatus 仅更新文档状态
 // status 取值：pending / processing / success / failed
 func UpdateDocumentStatus(id uint64, status string) error {
 	return DB.Model(&model.Document{}).
 		Where("id = ?", id).
 		Update("status", status).Error
+}
+
+// UpdateDocumentResult 更新文档状态，并可附带记录失败原因。
+// 用于向量化流程结束后的状态落库：
+//   - success：errorMsg 传空（成功无错误）
+//   - failed ：errorMsg 记录失败原因
+func UpdateDocumentResult(id uint64, status, errorMsg string) error {
+	updates := map[string]interface{}{"status": status}
+	// 只有失败才需要记录错误信息；成功时清空历史 error（避免残留上次的失败原因）
+	if status == "failed" {
+		updates["error_msg"] = errorMsg
+	} else {
+		updates["error_msg"] = nil
+	}
+	return DB.Model(&model.Document{}).
+		Where("id = ?", id).
+		Updates(updates).Error
 }

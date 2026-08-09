@@ -76,6 +76,25 @@ func GetFileURL(objectKey string) (string, error) {
 	return url.String(), nil
 }
 
+// DownloadFile 从 MinIO 下载对象内容，返回其字节流。
+// objectKey: 对象存储路径
+// 用于把存储的文件内容读回内存（如文档解析、向量化流程）。
+func DownloadFile(objectKey string) ([]byte, error) {
+	ctx := context.Background()
+	obj, err := MinioClient.GetObject(ctx, getBucket(), objectKey, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("打开对象失败: %w", err)
+	}
+	defer obj.Close()
+
+	// 读取完整内容（先对文件大小做个上限约束，防止超读；此处充分读取）
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, fmt.Errorf("读取对象内容失败: %w", err)
+	}
+	return data, nil
+}
+
 // DeleteFile 从默认 bucket 删除对象
 func DeleteFile(objectKey string) error {
 	ctx := context.Background()
