@@ -25,7 +25,7 @@ func main() {
 	fmt.Printf("MySQL   : %s@%s:%d/%s\n", cfg.MySQL.User, cfg.MySQL.Host, cfg.MySQL.Port, cfg.MySQL.DBName)
 	fmt.Printf("Redis   : %s:%d (password:%s)\n", cfg.Redis.Host, cfg.Redis.Port, cfg.Redis.Password)
 	fmt.Printf("MinIO   : %s (bucket:%s, useSSL:%v)\n", cfg.MinIO.Endpoint, cfg.MinIO.Bucket, cfg.MinIO.UseSSL)
-	fmt.Printf("Qdrant  : %s:%d\n", cfg.Qdrant.Host, cfg.Qdrant.Port)
+	fmt.Printf("Qdrant  : %s:%d (collection:%s)\n", cfg.Qdrant.Host, cfg.Qdrant.Port, cfg.Qdrant.CollectionName)
 	fmt.Printf("JWT     : secret=%s expire=%d 秒 (~%.1fh)\n", maskKey(cfg.JWT.Secret), cfg.JWT.ExpireSeconds, float64(cfg.JWT.ExpireSeconds)/3600)
 	fmt.Printf("LLM     : chatModel=%s embedModel=%s\n", cfg.LLM.ChatModel, cfg.LLM.EmbeddingModel)
 	fmt.Printf("          base=%s timeout=%ds maxRetries=%d\n", cfg.LLM.BaseURL, cfg.LLM.Timeout, cfg.LLM.MaxRetries)

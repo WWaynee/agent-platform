@@ -36,7 +36,13 @@ type MinIOConfig struct {
 // Qdrant 配置
 type QdrantConfig struct {
 	Host string
+	// Port REST API 端口（6333）；本项目当前 SDK 走 gRPC(GRPCPort)，此字段保留便于查看
 	Port int
+	// GRPCPort gRPC 端口（通过 QDRANT_GRPC_PORT 配置），Qdrant Go SDK 使用该端口连接。
+	// Qdrant：REST=6333，gRPC=6334
+	GRPCPort int
+	// CollectionName 向量集合名（如 documents），写入/检索都针对该集合
+	CollectionName string
 }
 
 // JWT 配置
@@ -116,8 +122,10 @@ func Load() error {
 
 	// Qdrant
 	cfg.Qdrant = QdrantConfig{
-		Host: getEnv("QDRANT_HOST", "127.0.0.1"),
-		Port: getEnvInt("QDRANT_PORT", 6333),
+		Host:           getEnv("QDRANT_HOST", "127.0.0.1"),
+		Port:           getEnvInt("QDRANT_PORT", 6333),
+		GRPCPort:       getEnvInt("QDRANT_GRPC_PORT", 6334),
+		CollectionName: getEnv("QDRANT_COLLECTION", "documents"),
 	}
 
 	// JWT（默认 24 小时）

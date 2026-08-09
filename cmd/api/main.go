@@ -37,11 +37,18 @@ func main() {
 	if err := storage.InitMinIO(); err != nil {
 		log.Fatalf("初始化 MinIO 失败: %v", err)
 	}
+	log.Println("✅ MinIO 连接成功")
 
-	// 5. 初始化 Gin 引擎（含全局中间件与路由）
+	// 5. 初始化 Qdrant 连接（向量数据库，RAG 检索）
+	if err := storage.InitQdrant(storage.DefaultVectorSize); err != nil {
+		log.Fatalf("初始化 Qdrant 失败: %v", err)
+	}
+	log.Println("✅ Qdrant 连接成功")
+
+	// 6. 初始化 Gin 引擎（含全局中间件与路由）
 	router := api.NewRouter()
 
-	// 5. 启动 HTTP 服务，监听配置里的端口
+	// 6. 启动 HTTP 服务，监听配置里的端口
 	addr := fmt.Sprintf(":%d", cfg.Server.HTTPPort)
 	log.Printf("🚀 服务启动，监听 %s", addr)
 	if err := router.Run(addr); err != nil {
