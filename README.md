@@ -235,6 +235,11 @@
    → 模板五大段：① 角色设定 ② 可用工具列表（Name + Description + JSONSchema）③ 输出格式要求（`{"action", "action_input"}` / `final_answer`）④ 正例 ⑤ 规则（一次一条 JSON、只能用列出的工具、不知道就说不知道勿编造）。
    → 自测：含 knowledge_retrieve/echo 工具列表、参数 Schema、action 格式、final_answer、示例、规则，全部核验通过。
 
+14. **LLM 输出解析器（多层容错）**：LLM 不一定严格按 `{action,action_input}` 输出，解析失败会让 Agent 崩溃，故做多层容错"尽力救回"。
+   → `agent/engine/parser.go`：`parseLLMOutput(output)`（导出 `ParseLLMOutput`）返回 `*ParsedOutput{Action, Input}`。
+   → 容错候选按可修复程度依次尝试：① 原文字符串直接解析 ② 剥掉 ```json/``` 代码围栏 ③ 取第一个 `{` 到最后一个 `}` 截取。缺失 action 判定为非法；全失败返回错误（绝不 panic）。
+   → 自测：标准 JSON ✅、```json围栏 ✅、前后多余文字 ✅、纯```围栏 ✅、完全乱→返回错误不 panic ✅、空串→错误不 panic ✅。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -423,7 +428,7 @@ agent-platform/
 │
 ├── agent/                       # 自研 Agent 引擎（ReAct 骨架，周五起）
 │   ├── interfaces/interfaces.go #   AgentContext（多租户/会话上下文，下沉避免循环依赖）
-│   ├── engine/                  #   ReAct 引擎：engine.go(主循环) / prompt.go(SystemPrompt模板) / types.go
+│   ├── engine/                  #   ReAct 引擎：engine.go(主循环) / prompt.go(模板) / parser.go(LLM输出解析) / types.go
 │   ├── toolmanager/             #   工具注册中心 + PermissionChecker 接口
 │   ├── toolkit/                 #   可插拔工具实现（echo 测试 / knowledge_retrieve）
 │   └── memory/                  #   会话记忆（inmemory 当前）
