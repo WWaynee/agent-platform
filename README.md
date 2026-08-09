@@ -200,6 +200,10 @@
    → 边界：**文档不存在**时直接返回哨兵错误 `ErrDocumentNotFound`，handler 用 errors.Is 识别后返回 400，**不置 failed**（文档本身不存在，置 failed 无意义且误导排查）。
    → 自测：故意传不存在文档 ID → 返回 400"文档不存在或无权访问"，服务不崩；故意把 Embedding key 写错 → 文档状态置 failed、error_msg 完整记录 API 返回的错误，服务不崩。
 
+8. **知识库检索 service 与多租户隔离**：要把"问题 → 相关切片"的检索能力封装给上层（RAG 对话 / ReAct 工具），且 tenant_id 隔离必须硬性保证。
+   → 解决：新增 `api/service/knowledge.go` 的 `Search(tenantID, query, topK) ([]SearchHit, error)`：query 先 Embedding 转向量，再调 `storage.SearchVectors`。**隔离底线在 storage 死守**——`SearchVectors` 的签名强制 `tenantID uint64` 参数（不传编译不过），函数内部用 `tenantIDFilter` 构造 `tenant_id` 等值过滤，业务层传错也被过滤兜住。
+   → 自测（带 tenant_id 逐条核对命中点）：租户 9988 / 1 / 2 各检索，命中的每一条 `tenant_id` 都等于发起检索的租户，**零跨租户泄漏**。topK≤0 自动取默认 3。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -352,8 +356,9 @@ agent-platform/
 │   ├── router.go              #   路由注册：公开组（health/注册/登录）与私有组（JWT 鉴权）
 │   ├── handler/               #   处理器：tenant.go / user.go / document.go（绑定参数、调 service）
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
-│   │   └── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
-│   │                          #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
+│   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
+│   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
+│   │   └── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
 │   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / context
 │   ├── response/              #   统一返回格式与错误码工具
 │   └── .gitkeep
