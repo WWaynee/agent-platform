@@ -55,6 +55,9 @@ func NewRouter() *gin.Engine {
 		// 知识库检索（测试/调试接口，按当前租户强制过滤检索文档片段）
 		private.POST("/knowledge/search", handler.KnowledgeSearch)
 
+		// Agent 对话（ReAct 引擎，需登录，tenant_id 从 JWT 上下文拿）
+		private.POST("/chat", handler.Chat)
+
 		// 租户管理（创建/查询租户都需登录）
 		private.POST("/tenant", handler.CreateTenant)                 // 创建租户
 		private.GET("/tenant/list", handler.ListTenants)              // 租户列表

@@ -40,8 +40,6 @@ type Message struct {
 const (
 	// finalAnswerAction 预留的终止动作名：LLM 输出该 action 即表示直接回答，不再调工具。
 	finalAnswerAction = "final_answer"
-	// observeTemplate 工具执行结果的包装模板：把观察结果明确喂回给 LLM。
-	observeTemplate = "工具 %q 的执行结果（观察结果）：\n%s"
 	// maxParseRetries LLM 输出解析失败时的最大重试次数（防止无限重试）。
 	maxParseRetries = 1
 )
@@ -159,9 +157,13 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		log.Printf("[ReAct] 调用工具 %s 完成", parsed.Action)
 
 		// h. 把"这次的决策 + 观察结果"追加进上下文，供下一轮继续思考
+		// 注意：观察结果用 user 角色而非 tool 角色喂回——本引擎是"文本JSON" ReAct 约定，
+		// 并非 OpenAI 原生 function-calling(tool_calls) 协议。若标记为 tool 角色，
+		// DeepSeek 等兼容 API 会强制要求前驱 assistant 消息带 tool_calls/tool_call_id 而报 400。
+		// 用 user 角色承载观察结果即可稳定兼容，又不失可读性。
 		msgs = append(msgs,
 			Message{Role: "assistant", Content: raw},
-			Message{Role: "tool", Content: fmt.Sprintf(observeTemplate, parsed.Action, out)},
+			Message{Role: "user", Content: fmt.Sprintf("工具 %q 的观察结果：\n%s", parsed.Action, out)},
 		)
 	}
 

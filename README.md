@@ -247,6 +247,25 @@
    → 每轮 `log` 打印会话/轮次/LLM输出/工具调用，便于调试。对话（user+assistant）经 `persist` 写回 Memory。
    → 自测（mock LLM 预设序列）：A 工具调用→观察→final_answer→存记忆 全链打通 ✅；B 首轮乱码解析失败→重试成功 ✅；C 达最大迭代强制收尾、ToolCalls 完整、不 panic ✅。`go test ./agent/...` 全绿。
 
+16. **对话接口 POST /api/chat（端到端落地）**：把 ReAct 引擎暴露成 HTTP 接口，真正可调用。
+   → `api/handler/chat.go` 的 `Chat` handler：私有路由组（JWT 鉴权），`tenant_id`/`user_id` 一律从 JWT 上下文拿（唯一可信来源，不信前端）。入参 `{session_id, query}` → 构造 `engine.AgentContext{TenantID,UserID,SessionID}` → `engine.Run` → 返回 answer + tool_calls。
+   → 组件装配放 `cmd/api/main.go`：`llmclient.NewClient` → `engine.NewLLMAdapter`（把完整 llmclient.Client 薄封装成 engine.LLMClient 最小接口）→ `engine.NewReActEngine(llm, tm, memory.NewInMemoryMemory(), "")` → `handler.SetAgentEngine` 注入。
+   → `agent/engine/llm_adapter.go`：把 engine.Message → llmclient.ChatMessage，调用后返回回复文本。
+   → 自测：未带 token → 401 ✅；带 token → 返回 `answer:"1+1等于2"`、`tool_calls:[]` ✅。
+
+17. **端到端：常识问题直接回答（不调工具）**：问 "1+1等于几?"，LLM 第1轮即 `{"action":"final_answer",...}`，日志无"调用工具"、返回 `tool_calls:[]` ✅。
+   → Prompt 写得对：LLM 清楚"可直接回答时不调工具"，未出现误触发工具。
+
+18. **端到端：知识库问题自动检索（核心成功）**：上传《员工手册》→ 向量化 → 问"公司的带薪年假是多少天？"。
+   → 日志：第1轮 LLM 输出 `{"action":"knowledge_retrieve","action_input":"{\"query\":\"带薪年假天数\"}"}` → 调用工具 → 第2轮 final_answer。
+   → 回答"根据员工手册第二章第3条…每年享有5天带薪年假"，与文档一致非编造；`tool_calls:["knowledge_retrieve"]` ✅。
+   ⚠️ **踩坑记录（DeepSeek tool 角色协议）**：把观察结果用 `role:"tool"` 喂回会给 DeepSeek 报 HTTP 400（`missing tool_call_id`）——因为本引擎是"文本JSON"ReAct 而非 OpenAI 原生 function-calling 协议，tool 角色要求前驱 assistant 带 tool_calls/tool_call_id。已改回用 `role:"user"` 承载观察结果，稳定兼容。
+
+19. **多租户隔离终极验证（项目核心卖点）✅✅**：租户 A(9988) 上传含"租户A的秘密是苹果香蕉梨"，租户 B(9) 上传含"租户B的秘密是橘子葡萄西瓜"，双方向量化。
+   → 租户 B 问"租户A的秘密是什么？"→ 调用 knowledge_retrieve 检索自己知识库（tenant_id=9 强制过滤）→ 答"我不知道租户A的秘密是什么"。
+   → 反向全验证：B问自己的秘密能答出"橘子葡萄西瓜"✅；A问自己的能答出"苹果香蕉梨"✅；A问B的"未找到，不知道"✅；B问A的未泄漏✅。**双向隔离全部生效，跨租户零泄漏**。
+   → 根因在 storage `SearchVectors` 的 `tenant_id` 等值过滤（不传编译不过），业务层传错也被兜住——隔离兜底在数据层死守。
+
 
 #### 周日・会话记忆 & 上下文压缩
 
@@ -397,7 +416,7 @@ agent-platform/
 │
 ├── api/                       # HTTP 接口层（Gin）
 │   ├── router.go              #   路由注册：公开组（health/注册/登录）与私有组（JWT 鉴权）
-│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go
+│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
@@ -435,7 +454,7 @@ agent-platform/
 │
 ├── agent/                       # 自研 Agent 引擎（ReAct 骨架，周五起）
 │   ├── interfaces/interfaces.go #   AgentContext（多租户/会话上下文，下沉避免循环依赖）
-│   ├── engine/                  #   ReAct 引擎：engine.go(主循环) / prompt.go(模板) / parser.go(LLM输出解析) / types.go
+│   ├── engine/                  #   ReAct 引擎：engine.go(主循环) / prompt.go(模板) / parser.go(解析) / llm_adapter.go(适配真实LLM) / types.go
 │   ├── toolmanager/             #   工具注册中心 + PermissionChecker 接口
 │   ├── toolkit/                 #   可插拔工具实现（echo 测试 / knowledge_retrieve）
 │   └── memory/                  #   会话记忆（inmemory 当前）
