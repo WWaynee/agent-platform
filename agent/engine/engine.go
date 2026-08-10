@@ -186,7 +186,16 @@ func (e *ReActEngine) buildInitialMessages(ctx AgentContext, history []memory.Ch
 	return msgs
 }
 
-// persist 把本次的 user 提问与 assistant 回答写回 Memory，延续会话上下文。
+// persist 把"本轮的用户提问 + 引擎最终回答"写回 Memory（user + assistant 两条）。
+//
+// 设计（中间过程存不存历史）：只存**最终问答**，不存中间过程。
+//   - 中间轮次的 LLM 思考（reasoning）与工具观察结果，只在当次请求内部的 msgs 快照里即时消费，
+//     事后不写回 Memory——下一轮上下文只需知道"上轮问了什么、答了什么"，无需重放工具调用全过程。
+//   - 存得少则占 token 少，Memory 层（CompressingMemory）超长自动压缩也更省。
+//   - 工具调用过程不丢：通过 AgentResponse.ToolCalls 返回，供审计 / 前端逐步展示。
+//
+// 每次写入都经 Memory.AddMessage；因装配了 CompressingMemory，若该会话累计超长，
+// 会在写入后由 Memory 自动触发摘要压缩，引擎无需关心压缩细节。
 func (e *ReActEngine) persist(ctx AgentContext, query, answer string) {
 	e.Memory.AddMessage(ctx.TenantID, ctx.SessionID, memory.ChatMessage{Role: memory.RoleUser, Content: query})
 	e.Memory.AddMessage(ctx.TenantID, ctx.SessionID, memory.ChatMessage{Role: memory.RoleAssistant, Content: answer})
