@@ -58,6 +58,11 @@ func NewRouter() *gin.Engine {
 		// Agent 对话（ReAct 引擎，需登录，tenant_id 从 JWT 上下文拿）
 		private.POST("/chat", handler.Chat)
 
+		// 会话管理（创建/列表/删除，需登录）
+		private.POST("/session", handler.CreateSession)       // 创建会话
+		private.GET("/session/list", handler.GetSessionList)  // 会话列表（只当前用户）
+		private.DELETE("/session/:id", handler.DeleteSession) // 删除会话（只删自己的）
+
 		// 租户管理（创建/查询租户都需登录）
 		private.POST("/tenant", handler.CreateTenant)                 // 创建租户
 		private.GET("/tenant/list", handler.ListTenants)              // 租户列表
