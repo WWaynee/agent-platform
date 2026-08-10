@@ -73,10 +73,18 @@ func main() {
 	{
 		llmCli := llmclient.NewClient(cfg.LLM)     // 真实 LLM 客户端（DeepSeek/硅基流动）
 		llmAdapter := engine.NewLLMAdapter(llmCli) // 适配成 engine.LLMClient 最小接口
-		mem := memory.NewRedisMemory(storage.RDB)  // 会话记忆（Redis 持久化，重启不丢）
-		agentEngine := engine.NewReActEngine(llmAdapter, tm, mem, "")
+
+		// 底层：Redis 会话记忆（持久化，重启不丢）
+		baseMem := memory.NewRedisMemory(storage.RDB)
+		agentEngine := engine.NewReActEngine(llmAdapter, tm, baseMem, "")
+
+		// 叠加"超长自动压缩"：用 auto 压缩记忆替换引擎记忆——业务层无感知，
+		// 在 AddMessage 时若历史 token 超阈值，Memory 内部自动生成摘要并压缩（引擎只是正常拿历史/加消息）。
+		// agentEngine 实现了 memory.Summarizer，故直接作为摘要生成器注入。
+		agentEngine.Memory = memory.NewCompressingMemory(baseMem, agentEngine)
+
 		handler.SetAgentEngine(agentEngine) // 注入 HTTP 对话接口使用
-		log.Println("✅ ReAct 引擎就绪，已装配 LLM/工具/Redis记忆/权限校验")
+		log.Println("✅ ReAct 引擎就绪，已装配 LLM/工具/Redis记忆(超长自动压缩)/权限校验")
 	}
 
 	// 8. 初始化 Gin 引擎（含全局中间件与路由）

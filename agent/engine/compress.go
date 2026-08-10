@@ -62,10 +62,28 @@ func (e *ReActEngine) CompressHistory(ctx context.Context, actx AgentContext, hi
 	return compressed, nil
 }
 
+// ============ 摘要生成（实现 memory.Summarizer，供 Memory 层注入） ============
+
+// summarizeInstruction 让 LLM 生成历史摘要的系统指令。
+const summarizeInstruction = `请把以下对话历史压缩成一段简洁的摘要，保留关键信息和上下文，不要丢失重要细节。摘要用中文。只输出摘要正文，不要任何解释或前后缀：`
+
+// Summarize 实现 memory.Summarizer 接口：
+// 把一段历史拼成可读文本，发给 LLM 生成中文摘要。
+// 供 Memory 层（CompressingMemory）注入使用，也供 engine 自身 summarizePart 复用同一 prompt。
+func (e *ReActEngine) Summarize(msgs []memory.ChatMessage) (string, error) {
+	return e.summarizeMessages(context.Background(), msgs)
+}
+
 // summarizePart 把一段历史拼成可读文本，发给 LLM 生成中文摘要。
 func (e *ReActEngine) summarizePart(ctx context.Context, msgs []memory.ChatMessage) (string, error) {
+	return e.summarizeMessages(ctx, msgs)
+}
+
+// summarizeMessages 核心实现：拼接历史 → 调用 LLM → 返回摘要正文。
+func (e *ReActEngine) summarizeMessages(ctx context.Context, msgs []memory.ChatMessage) (string, error) {
 	var sb strings.Builder
-	sb.WriteString("请把以下对话历史压缩成一段简洁的摘要，保留关键信息和上下文，不要丢失重要细节。摘要用中文。只输出摘要正文，不要任何解释或前后缀：\n\n")
+	sb.WriteString(summarizeInstruction)
+	sb.WriteString("\n\n")
 	for _, m := range msgs {
 		sb.WriteString(fmt.Sprintf("%s: %s\n", roleLabel(m.Role), m.Content))
 	}
@@ -103,3 +121,6 @@ func roleLabel(role memory.Role) string {
 		return "系统"
 	}
 }
+
+// 编译期断言：ReActEngine 实现 memory.Summarizer，可直接注入 CompressingMemory。
+var _ memory.Summarizer = (*ReActEngine)(nil)
