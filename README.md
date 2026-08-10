@@ -285,6 +285,20 @@
 > - 会话**元数据**落 MySQL `sessions` 表；会话**对话消息**存 Redis（`session:{tenant_id}:{id}:messages`）。会话主键 ID 即 Redis 里的 session_id。
 > - 自测通过：创建会话 ✅、列表只当前用户 ✅、删除会话时 Redis 消息历史同步清理 ✅、越权删他人会话被拒 ✅。
 
+> 📌 周日追加成果②（超长上下文自动压缩，已落地）：
+> - 压缩下沉到 **Memory 层**（`agent/memory/compressing.go` 的 `CompressingMemory` 装饰器）：包裹底层 `RedisMemory` / `InMemoryMemory`，**在 `AddMessage` 时检查该会话历史总 token**，超阈值（`CompressThresholdTokens=2000`）即自动压缩——**业务层（引擎）无感知**，只正常拿历史 / 加消息。
+> - 压缩内部逻辑：拆新旧 → 旧历史经注入的 `Summarizer`（`ReActEngine.Summarize`，真实 LLM）生成中文摘要 → 组装 `[system 摘要 + 最近 3 轮原文]` → 写回底层。**摘要失败（LLM）降级**为丢弃旧消息、保留最近几轮，不中断对话；**防频繁套娃**（历史首条已是 system 摘要则本轮不重复压缩）。
+> - 生产装配（`cmd/api/main.go`）：`baseMem=NewRedisMemory` + `agentEngine`；再以 `agentEngine.Memory = NewCompressingMemory(baseMem, agentEngine)` 替换；`agentEngine` 即实现 `memory.Summarizer`。
+> - 触发时机：每 `AddMessage` 后检查；阈值 / 保留轮数 / 结构见 `compressing.go` 常量。
+> - 自测：短对话不压缩 ✅；超长对话自动压缩（单测用注入 Summarizer 的 mock，另用真实 Redis+LLM 冒烟验证）✅；压缩后 token 下降 ✅；摘要失败降级 ✅。`go test ./agent/...` 全绿。
+
+> ⚠️ **已知设计取舍 / 待优化（暂记此，下一阶段复盘）**：
+> - **压缩是"覆盖式替代"**：当前 `CompressingMemory` 的写回走 `base.Clear()`（Redis 即 `DEL key`）+ 逐条 `RPUSH` 重建。即**被压缩掉的旧对话逐字原文从 Redis 被永久覆盖、不可回溯**（只剩摘要里的大意）。
+> - **影响**：若前端后续要**展示完整历史对话 / 做审计回看**，目前会拿到"压缩后的摘要 + 最近几轮"，拿不到被压掉的原始消息。
+> - **计划优化方向（双轨）**：分离存储——① 完整原文 `session:{tenant}:{sid}:messages`（永不压缩，供前端展示/审计）；② 喂模型的压缩副本（如 `session:{tenant}:{sid}:compressed`，超长时只刷新这份）。引擎读压缩版、前端读完整版，让"上下文不超窗"与"完整历史可回溯"兼得。
+> - 本轮**未改代码**，仅记录取舍，留待后续专门处理。
+
+
 
 ### 第二周
 
