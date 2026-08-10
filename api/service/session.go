@@ -41,6 +41,13 @@ func CreateSession(tenantID, userID uint64, title string) (uint64, error) {
 	return s.ID, nil
 }
 
+// GetSessionDetail 按 ID 查询单个会话（带租户过滤）。
+// 供对话接口校验"传的 session_id 是否属于当前租户"。
+// 记录不存在或属于别的租户时，返回 gorm.ErrRecordNotFound（由调用方统一转"无权访问"）。
+func GetSessionDetail(tenantID, id uint64) (*model.Session, error) {
+	return storage.GetSessionByID(tenantID, id)
+}
+
 // GetSessionList 会话列表。
 // 只返回当前用户的会话（tenant + user 双重过滤），按更新时间倒序，分页。
 // 返回该页数据切片、总数、以及可能的错误。
