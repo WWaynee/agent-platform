@@ -13,6 +13,7 @@ import (
 	"agent-platform/api/service"
 	"agent-platform/config"
 	"agent-platform/llmclient"
+	"agent-platform/mq"
 	"agent-platform/storage"
 	"agent-platform/toolkit"
 )
@@ -53,6 +54,13 @@ func main() {
 		log.Fatalf("初始化 Qdrant 失败: %v", err)
 	}
 	log.Println("✅ Qdrant 连接成功")
+
+	// 5.5 初始化 RabbitMQ 连接（消息队列：文档解析异步任务后台处理）
+	if err := mq.InitRabbitMQ(); err != nil {
+		log.Fatalf("初始化 RabbitMQ 失败: %v", err)
+	}
+	log.Printf("✅ RabbitMQ 连接成功 (vhost=%s, queue=%s)",
+		cfg.RabbitMQ.Vhost, cfg.RabbitMQ.QueueName)
 
 	// 6. 初始化工具管理器：注册知识库检索工具 + 注入基于 DB 的工具权限校验
 	tm := toolmanager.NewToolManager()

@@ -495,8 +495,9 @@ agent-platform/
 │       ├── summarizer.go        #   Summarizer 接口(把历史折叠成摘要; 引擎注入实现)
 │       │                        #     redis key: session:{tenant}:{sid}:messages
 │       └── *_test.go            #   各实现对应单测
-├── mq/                        # （预留）消息队列封装（异步任务，第二周周一）
-│   └── .gitkeep
+├── mq/                        # 消息队列封装（异步任务，第二周周一）
+│   └── rabbitmq.go            #   RabbitMQ 基础客户端：InitRabbitMQ 连接+建Channel+声明队列 /
+│                              #   Publish 发消息(durable 持久化) / Consume 消费(手动ACK,失败重入队)
 ├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
 │   └── .gitkeep
 ├── toolkit/                    # 可插拔工具集（Agent 调用能力注入）
