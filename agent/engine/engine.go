@@ -123,7 +123,12 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		// a. 调 LLM 生成下一步输出（想）
 		raw, err := e.LLMClient.Chat(context.Background(), ChatRequest{Messages: msgs})
 		if err != nil {
-			return nil, fmt.Errorf("调用 LLM 失败: %w", err)
+			// LLM 调用失败 → 降级：不 panic、不裸抛错误，改返回友好兜底回答，
+			// 并把原始错误塞进 meta 供审计（answer 对用户友好，错误详情对开发可见）。
+			resp := &AgentResponse{Answer: "抱歉，模型服务暂时不可用，请稍后再试。"}
+			resp.ToolCalls = calls
+			resp.WithMeta("error", fmt.Errorf("调用 LLM 失败: %w", err))
+			return resp, nil
 		}
 		lastRaw = raw
 		log.Printf("[ReAct] LLM 输出: %.180s", raw)
