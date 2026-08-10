@@ -270,7 +270,7 @@
 #### 周日・会话记忆 & 上下文压缩
 
 ##### 第 1 小步：Redis 客户端封装（✅ 完成）
-- [x] `storage/init.go` `InitRedis()` 从配置拿 host/port/password/**db**，创建 go-redis 客户端
+- [x] `storage/redis.go` `InitRedis()` 从配置拿 host/port/password/**db**，创建 go-redis 客户端
 - [x] **连通性校验**：`Ping` 实际验证——错误密码/空密码立即报错（实测拦截 NOAUTH/WRONGPASS），启动即失败而非带病运行
 - [x] `config` 新增 `Redis.DB` 逻辑库配置（`REDIS_DB`，默认 0），会话记忆可据此分库
 - [x] `cmd/api/main.go` 启动流程调用 `InitRedis`，启动日志 `✅ Redis 连接成功 (db=0)`
@@ -435,7 +435,7 @@ agent-platform/
 │   └── .gitkeep
 │
 ├── storage/                   # 数据持久化层
-│   ├── init.go                #   Redis 客户端初始化
+│   ├── redis.go               #   Redis 客户端初始化 InitRedis（含 Ping 连通性校验 + 全局 RDB）
 │   ├── mysql.go               #   MySQL 初始化（GORM）
 │   ├── minio.go               #   MinIO SDK 封装 + 初始化：Upload/Download/GetURL/Delete
 │   ├── qdrant.go              #   Qdrant 向量库封装：批量入库 UpsertVectors + 多租户检索 SearchVectors

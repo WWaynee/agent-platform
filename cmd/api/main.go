@@ -73,10 +73,10 @@ func main() {
 	{
 		llmCli := llmclient.NewClient(cfg.LLM)     // 真实 LLM 客户端（DeepSeek/硅基流动）
 		llmAdapter := engine.NewLLMAdapter(llmCli) // 适配成 engine.LLMClient 最小接口
-		mem := memory.NewInMemoryMemory()          // 会话记忆（当前内存版）
+		mem := memory.NewRedisMemory(storage.RDB)  // 会话记忆（Redis 持久化，重启不丢）
 		agentEngine := engine.NewReActEngine(llmAdapter, tm, mem, "")
 		handler.SetAgentEngine(agentEngine) // 注入 HTTP 对话接口使用
-		log.Println("✅ ReAct 引擎就绪，已装配 LLM/工具/记忆/权限校验")
+		log.Println("✅ ReAct 引擎就绪，已装配 LLM/工具/Redis记忆/权限校验")
 	}
 
 	// 8. 初始化 Gin 引擎（含全局中间件与路由）
