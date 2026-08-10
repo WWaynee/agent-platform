@@ -304,7 +304,7 @@
 
 #### 周一・异步任务 & MQ
 
-- [ ] docker-compose 启用 RabbitMQ
+- [x] docker-compose 启用 RabbitMQ
 - [ ] 封装 MQ 生产者
 - [ ] 实现协程消费者
 - [ ] 文档解析任务投递队列

@@ -60,3 +60,18 @@ services:
     volumes:
       - ./data/qdrant:/qdrant/storage
     restart: always
+
+  # 消息队列 RabbitMQ（异步任务：文档解析后台处理；带管理面板）
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: agent-rabbitmq
+    env_file: .env
+    ports:
+      - "${RABBITMQ_PORT}:5672"              # AMQP 协议端口（应用连接）
+      - "${RABBITMQ_MANAGEMENT_PORT}:15672"  # 管理面板端口
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - ./data/rabbitmq:/var/lib/rabbitmq
+    restart: always
