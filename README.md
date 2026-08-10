@@ -477,10 +477,25 @@ agent-platform/
 │
 ├── agent/                       # 自研 Agent 引擎（ReAct 骨架，周五起）
 │   ├── interfaces/interfaces.go #   AgentContext（多租户/会话上下文，下沉避免循环依赖）
-│   ├── engine/                  #   ReAct 引擎：engine.go(主循环) / prompt.go(模板) / parser.go(解析) / llm_adapter.go(适配真实LLM) / types.go
-│   ├── toolmanager/             #   工具注册中心 + PermissionChecker 接口
-│   ├── toolkit/                 #   可插拔工具实现（echo 测试 / knowledge_retrieve）
-│   └── memory/                  #   会话记忆（inmemory 单测版 + redis 生产版：RedisMemory, 落 Redis 持久化）
+│   ├── engine/                  #   ReAct 引擎（调度核心）
+│   │   │                       #     engine.go: 主循环 Run(拿历史→拼Prompt→调LLM→解析→执行工具→持久化)
+│   │   │                       #     prompt.go: 动态拼装 SystemPrompt(角色+工具列表+JSON格式)
+│   │   │                       #     parser.go: 多层容错解析 LLM 输出为 {action,action_input}
+│   │   │                       #     llm_adapter.go: engine.Message ↔ llmclient.ChatMessage 适配
+│   │   │                       #     compress.go/compressor.go: 提炼"超长历史→摘要"的压缩/摘要逻辑
+│   │   │                       #     types.go: ChatRequest/Message/AgentResponse/ToolCall
+│   │   │                       #     (engine.Summarize 实现 memory.Summarizer, 供压缩调用)
+│   ├── toolmanager/             #   工具注册中心 tool.go/toolmanager.go + PermissionChecker 接口
+│   ├── toolkit/                 #   可插拔工具实现（echo_tool 测试 / knowledge_retrieve RAG）
+│   └── memory/                  #   会话记忆（接口设计 + 两层实现 + 超长自动压缩装饰器）
+│       ├── memory.go            #   Memory 接口(GetHistory/AddMessage/Clear/Truncate)
+│       ├── inmemory.go          #   内存版(单测/smoke)
+│       ├── redis.go             #   Redis 版(落 Redis, 生产; RPUSH/LRANGE/LTRIM/Redis List)
+│       ├── compressing.go       #   CompressingMemory 装饰器——AddMessage 超长自动检测
+│       │                        #     token>2000 即压缩, 引擎无感知(摘要失败降级/防套娃)
+│       ├── summarizer.go        #   Summarizer 接口(把历史折叠成摘要; 引擎注入实现)
+│       │                        #     redis key: session:{tenant}:{sid}:messages
+│       └── *_test.go            #   各实现对应单测
 ├── mq/                        # （预留）消息队列封装（异步任务，第二周周一）
 │   └── .gitkeep
 ├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
