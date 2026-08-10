@@ -46,14 +46,16 @@ CREATE TABLE `documents` (
 CREATE TABLE `agent_tasks` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `tenant_id` bigint unsigned NOT NULL,
-  `task_type` varchar(64) NOT NULL,
-  `biz_id` bigint unsigned DEFAULT NULL,
-  `status` varchar(32) NOT NULL,
-  `error_msg` text,
+  `task_type` varchar(64) NOT NULL COMMENT '任务类型，document_parse',
+  `biz_id` bigint unsigned DEFAULT NULL COMMENT '关联业务id，如 document id',
+  `status` varchar(32) NOT NULL COMMENT 'pending/processing/success/failed',
+  `error_msg` text COMMENT '错误信息（失败时记录）',
+  `retry_count` int NOT NULL DEFAULT '0' COMMENT '已重试次数',
   `created_at` datetime(3) DEFAULT NULL,
   `updated_at` datetime(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
-  KEY `idx_agent_tasks_tenant_id` (`tenant_id`)
+  KEY `idx_agent_tasks_tenant_id` (`tenant_id`),
+  KEY `idx_agent_tasks_biz_id` (`biz_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='agent异步任务';
 
 CREATE TABLE `sessions` (

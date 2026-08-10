@@ -47,14 +47,15 @@ type Document struct {
 
 // agent_task 异步任务表
 type AgentTask struct {
-	ID        uint64 `gorm:"primaryKey"`
-	TenantID  uint64 `gorm:"index;not null"`
-	TaskType  string `gorm:"size:64;not null;comment:document_parse"`
-	BizID     uint64 `gorm:"comment:关联业务id，document id"`
-	Status    string `gorm:"size:32;not null;comment:pending/running/success/failed"`
-	ErrorMsg  string `gorm:"type:text;comment:错误信息"`
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID         uint64 `gorm:"primaryKey"`
+	TenantID   uint64 `gorm:"index;not null"`
+	TaskType   string `gorm:"size:64;not null;comment:任务类型，document_parse"`
+	BizID      uint64 `gorm:"index;comment:关联业务id，如 document id"`
+	Status     string `gorm:"size:32;not null;comment:pending/processing/success/failed"`
+	ErrorMsg   string `gorm:"type:text;comment:错误信息（失败时记录）"`
+	RetryCount int    `gorm:"not null;default:0;comment:已重试次数"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // session 会话元数据表
