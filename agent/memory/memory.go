@@ -30,18 +30,21 @@ type ChatMessage struct {
 // 为什么定义成接口：
 //   - 先提供内存版实现跑通流程（简单快速）；
 //   - 后面换成 Redis 版，业务代码不用改——面向接口编程、方便切换实现。
+//
+// 多租户隔离：所有方法都显式要求 tenantID——即使 session_id 撞车，不同租户
+// 的历史也天然隔离（Redis 的 key、内存的 map 都按（tenantID, sessionID）分桶）。
 type Memory interface {
-	// GetHistory 获取某会话的完整历史消息。
-	// 返回该 sessionID 下的消息列表（按时间正序），无历史时返回 nil 或空切片。
-	GetHistory(sessionID string) []ChatMessage
+	// GetHistory 获取某租户某会话的完整历史消息。
+	// 返回该会话下的消息列表（按时间正序），无历史时返回 nil 或空切片。
+	GetHistory(tenantID uint64, sessionID string) []ChatMessage
 
-	// AddMessage 向某会话追加一条消息。
-	AddMessage(sessionID string, msg ChatMessage)
+	// AddMessage 向某租户某会话追加一条消息。
+	AddMessage(tenantID uint64, sessionID string, msg ChatMessage)
 
-	// Clear 清空某会话的所有历史。
-	Clear(sessionID string)
+	// Clear 清空某租户某会话的所有历史。
+	Clear(tenantID uint64, sessionID string)
 
-	// Truncate 超长时对某会话历史做截断/摘要。
+	// Truncate 超长时对某租户某会话历史做截断/摘要。
 	// maxTokens 是允许保留的最大 token 数。当前先预留接口，具体策略后续实现。
-	Truncate(sessionID string, maxTokens int)
+	Truncate(tenantID uint64, sessionID string, maxTokens int)
 }

@@ -269,14 +269,6 @@
 
 #### 周日・会话记忆 & 上下文压缩
 
-##### 第 1 小步：Redis 客户端封装（✅ 完成）
-- [x] `storage/redis.go` `InitRedis()` 从配置拿 host/port/password/**db**，创建 go-redis 客户端
-- [x] **连通性校验**：`Ping` 实际验证——错误密码/空密码立即报错（实测拦截 NOAUTH/WRONGPASS），启动即失败而非带病运行
-- [x] `config` 新增 `Redis.DB` 逻辑库配置（`REDIS_DB`，默认 0），会话记忆可据此分库
-- [x] `cmd/api/main.go` 启动流程调用 `InitRedis`，启动日志 `✅ Redis 连接成功 (db=0)`
-- [x] 自测：启动服务不报错 ✅；正确密码 ping 通过 ✅；错误/空密码被正确拦截 ✅
-
-##### 第 2 小步起：Redis 版 Memory（进行中）
 - [ ] Redis 实现短期会话记忆
 - [ ] 多轮对话历史存取
 - [ ] 上下文长度检测

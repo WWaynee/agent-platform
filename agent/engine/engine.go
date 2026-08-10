@@ -106,8 +106,8 @@ func NewReActEngine(llm LLMClient, tools *toolmanager.ToolManager, mem memory.Me
 //  4. 解析失败 → 塞回纠错提示重试(最多1次)；达最大轮次 → 强制兜底收尾。
 //  5. 把本次 user 提问与 assistant 回答写回 Memory。
 func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error) {
-	// 1. 从 Memory 读取该会话历史（正序）
-	history := e.Memory.GetHistory(ctx.SessionID)
+	// 1. 从 Memory 读取该会话历史（正序）；带 tenantID 实现"按租户+会话"隔离存取
+	history := e.Memory.GetHistory(ctx.TenantID, ctx.SessionID)
 
 	// 2. 组装消息序列：system + 历史 + 当前问题
 	msgs := e.buildInitialMessages(ctx, history, query)
@@ -188,8 +188,8 @@ func (e *ReActEngine) buildInitialMessages(ctx AgentContext, history []memory.Ch
 
 // persist 把本次的 user 提问与 assistant 回答写回 Memory，延续会话上下文。
 func (e *ReActEngine) persist(ctx AgentContext, query, answer string) {
-	e.Memory.AddMessage(ctx.SessionID, memory.ChatMessage{Role: memory.RoleUser, Content: query})
-	e.Memory.AddMessage(ctx.SessionID, memory.ChatMessage{Role: memory.RoleAssistant, Content: answer})
+	e.Memory.AddMessage(ctx.TenantID, ctx.SessionID, memory.ChatMessage{Role: memory.RoleUser, Content: query})
+	e.Memory.AddMessage(ctx.TenantID, ctx.SessionID, memory.ChatMessage{Role: memory.RoleAssistant, Content: answer})
 }
 
 // fallbackResponse 最大迭代终止时的兜底响应：能解析出 final_answer 就用它，

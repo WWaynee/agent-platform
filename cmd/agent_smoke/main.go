@@ -26,9 +26,9 @@ func (mockLLM) Chat(ctx context.Context, req engine.ChatRequest) (string, error)
 
 func main() {
 	// 1. 创建各组件
-	llm := mockLLM{}                          // LLM 客户端（mock）
-	tm := toolmanager.NewToolManager()        // 工具管理器
-	mem := memory.NewInMemoryMemory()         // 记忆管理器（内存版）
+	llm := mockLLM{}                   // LLM 客户端（mock）
+	tm := toolmanager.NewToolManager() // 工具管理器
+	mem := memory.NewInMemoryMemory()  // 记忆管理器（内存版）
 
 	// 2. 注册 echo 测试工具
 	if err := tm.RegisterTool(toolkit.NewEchoTool()); err != nil {
@@ -50,9 +50,9 @@ func main() {
 		fmt.Printf("✅ 工具 echo 已注册并找到（描述: %s）\n", got.Description())
 	}
 
-	// ② 记忆能存能取
-	mem.AddMessage("s1", memory.ChatMessage{Role: memory.RoleUser, Content: "你好"})
-	hist := mem.GetHistory("s1")
+	// ② 记忆能存能取（带租户隔离：tenantID=ctx.TenantID）
+	mem.AddMessage(ctx.TenantID, "s1", memory.ChatMessage{Role: memory.RoleUser, Content: "你好"})
+	hist := mem.GetHistory(ctx.TenantID, "s1")
 	if len(hist) != 1 || hist[0].Content != "你好" {
 		fmt.Println("❌ 记忆存/取失败")
 		ok = false
