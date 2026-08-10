@@ -249,7 +249,8 @@
 
 16. **对话接口 POST /api/chat（端到端落地）**：把 ReAct 引擎暴露成 HTTP 接口，真正可调用。
    → `api/handler/chat.go` 的 `Chat` handler：私有路由组（JWT 鉴权），`tenant_id`/`user_id` 一律从 JWT 上下文拿（唯一可信来源，不信前端）。入参 `{session_id, query}` → 构造 `engine.AgentContext{TenantID,UserID,SessionID}` → `engine.Run` → 返回 answer + tool_calls。
-   → 组件装配放 `cmd/api/main.go`：`llmclient.NewClient` → `engine.NewLLMAdapter`（把完整 llmclient.Client 薄封装成 engine.LLMClient 最小接口）→ `engine.NewReActEngine(llm, tm, memory.NewInMemoryMemory(), "")` → `handler.SetAgentEngine` 注入。
+   → 组件装配放 `cmd/api/main.go`：`llmclient.NewClient` → `engine.NewLLMAdapter`（把完整 llmclient.Client 薄封装成 engine.LLMClient 最小接口）→ `engine.NewReActEngine(llm, tm, memory.NewRedisMemory(storage.RDB), "")` → `handler.SetAgentEngine` 注入。
+   → （注：最初骨架用 `InMemoryMemory` 跑通；周日第3小步已把生产装配切为 **Redis 版 RedisMemory** 使会话历史落 Redis、重启不丢。内存版 `InMemoryMemory` 仍保留，供单测 / smoke 使用。）
    → `agent/engine/llm_adapter.go`：把 engine.Message → llmclient.ChatMessage，调用后返回回复文本。
    → 自测：未带 token → 401 ✅；带 token → 返回 `answer:"1+1等于2"`、`tool_calls:[]` ✅。
 
