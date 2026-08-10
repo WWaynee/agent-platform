@@ -457,6 +457,7 @@ agent-platform/
 │   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
 │   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）
 │   ├── session.go             #   会话 CRUD：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,更新时间倒序) / DeleteSession(软删)
+│   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / GetTaskByID / ListTasks(分页)
 │   └── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / SetToolConfig upsert）
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
