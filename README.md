@@ -270,14 +270,21 @@
 
 #### 周日・会话记忆 & 上下文压缩
 
-- [ ] Redis 实现短期会话记忆
-- [ ] 多轮对话历史存取
+- [x] Redis 实现短期会话记忆
+- [x] 多轮对话历史存取
 - [ ] 上下文长度检测
 - [ ] 超长对话自动摘要压缩
-- [ ] Agent 最大迭代轮次限制
-- [ ] 测试：多轮对话，Agent 记住上下文
+- [x] Agent 最大迭代轮次限制
+- [x] 测试：多轮对话，Agent 记住上下文
 - [ ] 测试：超长对话触发摘要压缩
-- [ ] 测试：循环场景达到最大轮次终止
+- [x] 测试：循环场景达到最大轮次终止
+
+> 📌 周日追加成果（会话管理阶段）：**能创建会话 / 查会话列表 / 删会话** 已落地——
+> - `storage/session.go`：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,按更新时间倒序) / DeleteSession(软删除)，所有查询强制 `tenant_id` 过滤。
+> - `api/service/session.go`：CreateSession(返回会话ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(校验存在+只删自己的 → 软删DB → 同步删 Redis 消息历史，保持两端一致)。
+> - 会话**元数据**落 MySQL `sessions` 表；会话**对话消息**存 Redis（`session:{tenant_id}:{id}:messages`）。会话主键 ID 即 Redis 里的 session_id。
+> - 自测通过：创建会话 ✅、列表只当前用户 ✅、删除会话时 Redis 消息历史同步清理 ✅、越权删他人会话被拒 ✅。
+
 
 ### 第二周
 
@@ -422,7 +429,8 @@ agent-platform/
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
 │   │   ├── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
-│   │   └── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单，默认开启知识库工具）
+│   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单，默认开启知识库工具）
+│   │   └── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
 │   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / context
 │   ├── response/              #   统一返回格式与错误码工具
 │   └── .gitkeep
@@ -432,11 +440,11 @@ agent-platform/
 │   ├── mysql.go               #   MySQL 初始化（GORM）
 │   ├── minio.go               #   MinIO SDK 封装 + 初始化：Upload/Download/GetURL/Delete
 │   ├── qdrant.go              #   Qdrant 向量库封装：批量入库 UpsertVectors + 多租户检索 SearchVectors
-│   ├── model/models.go        #   GORM 模型（7 张核心表的实体定义）
+│   ├── model/models.go        #   GORM 模型（全核心表的实体定义）
 │   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
 │   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）
+│   ├── session.go             #   会话 CRUD：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,更新时间倒序) / DeleteSession(软删)
 │   └── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / SetToolConfig upsert）
-│   └── document.go            #   文档元信息的数据库操作
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
 │   └── splitter.go
@@ -458,7 +466,7 @@ agent-platform/
 │   ├── engine/                  #   ReAct 引擎：engine.go(主循环) / prompt.go(模板) / parser.go(解析) / llm_adapter.go(适配真实LLM) / types.go
 │   ├── toolmanager/             #   工具注册中心 + PermissionChecker 接口
 │   ├── toolkit/                 #   可插拔工具实现（echo 测试 / knowledge_retrieve）
-│   └── memory/                  #   会话记忆（inmemory 当前）
+│   └── memory/                  #   会话记忆（inmemory 单测版 + redis 生产版：RedisMemory, 落 Redis 持久化）
 ├── mq/                        # （预留）消息队列封装（异步任务，第二周周一）
 │   └── .gitkeep
 ├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
