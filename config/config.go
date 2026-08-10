@@ -22,6 +22,7 @@ type RedisConfig struct {
 	Host     string
 	Port     int
 	Password string
+	DB       int // Redis 逻辑库号：会话记忆/限流等可按需分库（默认 0）
 }
 
 // MinIO 配置
@@ -109,6 +110,7 @@ func Load() error {
 		Host:     getEnv("REDIS_HOST", "127.0.0.1"),
 		Port:     getEnvInt("REDIS_PORT", 6379),
 		Password: getEnv("REDIS_PASSWORD", ""),
+		DB:       getEnvInt("REDIS_DB", 0),
 	}
 
 	// MinIO

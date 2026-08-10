@@ -31,15 +31,16 @@ func main() {
 	}
 	log.Println("✅ MySQL 连接成功")
 
-	// 3. 初始化 Redis 连接
+	// 3. 初始化 Redis 连接（含连通性 Ping 校验；会话记忆/限流等后续复用）
 	if _, err := storage.InitRedis(
 		cfg.Redis.Host,
 		cfg.Redis.Port,
 		cfg.Redis.Password,
+		cfg.Redis.DB,
 	); err != nil {
 		log.Fatalf("初始化 Redis 失败: %v", err)
 	}
-	log.Println("✅ Redis 连接成功")
+	log.Printf("✅ Redis 连接成功 (db=%d)", cfg.Redis.DB)
 
 	// 4. 初始化 MinIO 连接（对象存储）
 	if err := storage.InitMinIO(); err != nil {
