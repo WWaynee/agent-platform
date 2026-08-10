@@ -69,6 +69,17 @@ type LLMConfig struct {
 	MaxRetries int // 最大重试次数
 }
 
+// RabbitMQ 配置
+type RabbitMQConfig struct {
+	Host     string // AMQP 主机地址
+	Port     int    // AMQP 端口（默认 5672）
+	Username string // 用户名
+	Password string // 密码
+	Vhost    string // 虚拟主机（默认 /）
+	// QueueName 文档解析队列名（异步任务投递/消费统一用该队列）
+	QueueName string
+}
+
 // 服务配置
 type ServerConfig struct {
 	HTTPPort int // HTTP 监听端口
@@ -76,13 +87,14 @@ type ServerConfig struct {
 
 // Config 全局配置根结构体
 type Config struct {
-	MySQL  MySQLConfig
-	Redis  RedisConfig
-	MinIO  MinIOConfig
-	Qdrant QdrantConfig
-	JWT    JWTConfig
-	LLM    LLMConfig
-	Server ServerConfig
+	MySQL    MySQLConfig
+	Redis    RedisConfig
+	MinIO    MinIOConfig
+	Qdrant   QdrantConfig
+	JWT      JWTConfig
+	LLM      LLMConfig
+	RabbitMQ RabbitMQConfig
+	Server   ServerConfig
 }
 
 // GlobalConfig 全局配置实例，程序启动时加载一次
@@ -147,6 +159,16 @@ func Load() error {
 		EmbedBaseURL: getEnv("LLM_EMBED_BASE_URL", ""),
 		Timeout:      getEnvInt("LLM_TIMEOUT_SECONDS", 30),
 		MaxRetries:   getEnvInt("LLM_MAX_RETRY", 3),
+	}
+
+	// RabbitMQ（异步任务：文档解析后台处理）
+	cfg.RabbitMQ = RabbitMQConfig{
+		Host:      getEnv("RABBITMQ_HOST", "127.0.0.1"),
+		Port:      getEnvInt("RABBITMQ_PORT", 5672),
+		Username:  getEnv("RABBITMQ_DEFAULT_USER", "guest"),
+		Password:  getEnv("RABBITMQ_DEFAULT_PASS", "guest"),
+		Vhost:     getEnv("RABBITMQ_VHOST", "/"),
+		QueueName: getEnv("RABBITMQ_QUEUE_DOCUMENT_PARSE", "document_parse"),
 	}
 
 	// Server

@@ -313,6 +313,11 @@
 - [ ] 测试：提交异步任务，状态正确流转
 - [ ] 测试：任务失败，记录错误信息
 
+> 📌 周一进度②（配置项准备，已落地）：
+> - docker-compose 已启用 RabbitMQ（`rabbitmq:3-management`，AMQP 5672 + 管理面板 15672），数据挂载 `./data/rabbitmq`。
+> - `config/config.go` 新增 `RabbitMQConfig`（Host / Port / Username / Password / Vhost / QueueName），`Load()` 从 `.env` 解析，.env 增加 `RABBITMQ_*` 系列变量。
+> - 自测：`config.Load()` 后 RabbitMQ 字段均有值（Host=127.0.0.1 / Port=5672 / Username=admin / Vhost=/ / QueueName=document_parse），编译通过。
+
 #### 周二・权限管控 & 参数校验
 
 - [ ] 租户工具白名单配置
