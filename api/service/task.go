@@ -43,6 +43,22 @@ func ConsumeDocumentParseTask(taskID, tenantID, documentID uint64) error {
 		return fmt.Errorf("任务不存在或无权访问(task=%d): %w", taskID, err)
 	}
 
+	// 1.5 幂等检查：先查文档，若已是 success，说明之前某次消费已成功完成（可能重复投递/ACK 前重试），
+	//    直接跳过解析并把任务置 success，避免重复切片/Embedding/写库（结果一致，但省资源、幂等）。
+	doc, err := storage.GetDocumentByID(tenantID, documentID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// 文档不存在：解析无从谈起，无法重试，Ack 丢弃
+			return fmt.Errorf("文档不存在或无权访问(doc=%d): %w", documentID, err)
+		}
+		return fmt.Errorf("查询文档失败(doc=%d): %w", documentID, err)
+	}
+	if doc.Status == "success" {
+		// 幂等短路：文档已处理成功，直接确认任务成功，不重复处理
+		_ = storage.UpdateTaskStatus(taskID, "success", "")
+		return nil
+	}
+
 	// 2. 更新任务 → processing；更新文档 → processing（供前端轮询）
 	if err := storage.UpdateTaskStatus(taskID, "processing", ""); err != nil {
 		return fmt.Errorf("更新任务为 processing 失败(task=%d): %w", taskID, err)
