@@ -312,6 +312,30 @@
 - [x] 任务状态查询接口
 - [x] 测试：提交异步任务，状态正确流转
 - [x] 测试：任务失败，记录错误信息
+
+#### 📌 周一遇到的问题与解决方案
+
+1. **消费失败「无限循环」与「丢消息」的权衡（MQ ACK 策略）**：最朴素的写法是"成功 Ack、失败 Nack(requeue=true)"——失败消息会无限重入队重试，占满队列白耗资源；而"失败也 Ack"又会直接丢弃潜在可恢复的任务。两者都不可取。
+   → 解决：引入哨兵错误 `mq.ErrRequeue` 区分两种情况——**显式声明需要重试**才 `Nack(requeue=true)`，其余失败（业务性失败、解析失败等）一律 `Ack` 确认丢弃避免死循环。重试决策下沉到 service：失败时累加 `retry_count`，未到上限（`maxTaskRetry=3`）返回包装 `ErrRequeue` 的错误让消息重入队，达到上限才置 `failed` 并 Ack。既尽量不丢任务，又杜绝无限循环。
+   ⚠️ 注意点：**失败必须也要 ACK**，否则坏消息（如无法反序列化）会卡在队列头部反复消费、阻塞后面所有正常消息。
+
+2. **单条消息 panic 会拖垮整个 Worker（健壮性）**：consumer 的 handler 若内部 panic，向上传播会崩掉整个消费协程，再往上是整个 Worker 进程，队列也会因消息被 Unacked 而积压。
+   → 解决：`mq.Consume` 里加 `safeProcess`（defer + recover），把 handler 的 panic `recover()` 捕获转成 error，按失败处理并继续消费下一条。实测投递非法 JSON 消息 → worker 打印"解析消息体失败"但进程存活、后续正常消息照常处理。
+
+3. **Worker 与 API 同进程耦合的问题 → 拆独立进程**：解析是重活（读文件+切片+Embedding+写Qdrant），若放 API 进程里，一条大文档就会阻塞整个 API。且文档解析出故障会影响请求链路。
+   → 解决：单独 `cmd/worker` 独立进程，只初始化解析所需中间件（MySQL/MinIO/Qdrant/LLM/RabbitMQ）+ 注册消费者，阻塞消费。API 只负责接请求、落地任务记录、投 MQ 消息。两者零共享可独立启停、**多开 worker 即为横向扩容**（RabbitMQ work queue 自动分发）。
+   ⚠️ 注意点：`go run` 启动会残留编译子进程，调试重启要用 `pkill -f exe/main` / 编译 `bin/worker` 后精确 `kill $PID`，否则旧进程还在消费会干扰测试。
+
+4. **消息持久化 + 手动 ACK（不丢消息）**：默认队列与消息都是非持久化的，RabbitMQ 一重启消息全丢；自动 ACK 下消费者处理中崩溃，消息也直接丢。
+   → 解决：`QueueDeclare(durable=true)` + `Publish` 时 `DeliveryMode=amqp.Persistent`（双保险，RabbitMQ 重启消息重启后可恢复）；消费端 `autoAck=false` 手动 ACK。实测：worker 停机时上传 → 消息持久化积压 ready=1 → 重启 worker → 消费恢复并置 success，零丢失。
+
+5. **重复消费必须幂等（重试/ACK前崩溃）**：同一条消息可能被消费多次（失败重入队、ACK 前 worker 崩溃、手动重复投递），若每次处理都重新切片/Embedding/写库，会重复消耗 LLM 费用且短时间写重复向量点。
+   → 解决：消费入口 `ConsumeDocumentParseTask` 先查文档状态，**已是 `success` 直接跳过解析**、把任务置 success 即返回。配合 `ProcessDocument` 用 `(documentID<<32)|chunkIndex` 合成点 ID 的 upsert 覆盖写，双重保证幂等。实测重复投递同一条已成功任务 → Qdrant 点数不变、不重复向量化。
+
+6. **任务/文档状态流转要成对更新**：解析失败时不仅是任务要 `failed`，文档状态也要 `failed` 并记录 error_msg，供列表/详情展示失败原因；成功时两者都要 `success`。
+   → 解决：`ConsumeDocumentParseTask` 统一编排——置 processing → `ProcessDocument`（内部落文档 success/failed）→ 按结果同步任务 success/failed + error_msg + retry_count。新增 `storage.UpdateTaskRetry` 同时更新 `retry_count / status / error_msg`。
+   → 自测全通过：正常上传 pending→success ✅；空文件 → 任务+文档双 failed、error_msg="文档内容为空，无可切片文本"、retry_count=2 ✅；租户隔离（B 查 A 的任务返回"任务不存在"）✅；并发上传 5 份全 success、Qdrant 各有向量、零丢消息 ✅。
+
 #### 周二・权限管控 & 参数校验
 
 - [ ] 租户工具白名单配置
@@ -398,7 +422,8 @@ cp .env.example .env   # 修改 .env 中的配置
 go run cmd/migrate/main.go
 
 # 4. 启动服务
-go run cmd/api/main.go
+go run cmd/api/main.go        # API 服务（接请求、上传时投递 MQ 消息）
+go run cmd/worker/main.go     # Worker 独立进程（消费 document_parse 队列、执行异步解析，可多开扩容）
 ```
 
 服务启动后访问：`http://127.0.0.1:端口/health`
@@ -438,10 +463,12 @@ agent-platform/
 │
 ├── api/                       # HTTP 接口层（Gin）
 │   ├── router.go              #   路由注册：公开组（health/注册/登录）与私有组（JWT 鉴权）
-│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go
+│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go / session.go / task.go
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
+│   │   ├── task.go            #   异步任务消费编排 ConsumeDocumentParseTask（任务+文档状态流转、重试计数、
+│   │   │                      #   幂等短路） + 任务详情查询 GetTaskDetail
 │   │   ├── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
 │   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单，默认开启知识库工具）
 │   │   └── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
@@ -458,7 +485,7 @@ agent-platform/
 │   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
 │   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）
 │   ├── session.go             #   会话 CRUD：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,更新时间倒序) / DeleteSession(软删)
-│   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / GetTaskByID / ListTasks(分页)
+│   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / UpdateTaskRetry / GetTaskByID / ListTasks(分页)
 │   └── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / SetToolConfig upsert）
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
@@ -498,8 +525,11 @@ agent-platform/
 │       │                        #     redis key: session:{tenant}:{sid}:messages
 │       └── *_test.go            #   各实现对应单测
 ├── mq/                        # 消息队列封装（异步任务，第二周周一）
-│   └── rabbitmq.go            #   RabbitMQ 基础客户端：InitRabbitMQ 连接+建Channel+声明队列 /
-│                              #   Publish 发消息(durable 持久化) / Consume 消费(手动ACK,失败重入队)
+│   ├── message.go             #   消息结构体 DocumentParseMsg(task_id/tenant_id/document_id) + 生产者 PublishDocumentParseTask
+│   └── rabbitmq.go            #   RabbitMQ 基础客户端：InitRabbitMQ 连接+建Channel+声明队列(durable) /
+│                              #   Publish 发消息(持久化 Persistent) / Consume 消费(手动ACK)：
+│                              #   - 返回 nil → Ack；包装 ErrRequeue → Nack 重入队重试；其他失败/panic → 也 Ack（防死循环）
+│                              #   - safeProcess 用 defer/recover 捕获 handler panic，单条消息异常不拖垮 worker
 ├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
 │   └── .gitkeep
 ├── toolkit/                    # 可插拔工具集（Agent 调用能力注入）
@@ -525,6 +555,14 @@ cmd/(api...)  →  api/(handler → service)  →  storage/(MySQL/MinIO/Redis/Qd
                      splitter/(文档切片)      └── qdrant.go(向量入库/多租户检索)
                              ↑  ↓
                      api/service/document_parse.go(ProcessDocument 编排)
+
+异步链路（第二周周一）：
+cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队列)
+                                                           ↓ 手动 ACK
+                                          cmd/worker(Consume) → api/service.ConsumeDocumentParseTask
+                                                      （解析+任务/文档状态流转+重试+幂等）
+                                                                 ↓
+                                          ProcessDocument(切片→Embedding→写Qdrant)
 ```
 
 > 核心原则：**业务层只依赖 `llmclient.Client` 接口与 `storage` 层**，不直接触碰厂商 SDK / DB 细节，便于换厂商、换存储。RAG 链路（切片 → Embedding → Qdrant 向量入库与多租户检索）已打通。
@@ -547,7 +585,7 @@ cmd/(api...)  →  api/(handler → service)  →  storage/(MySQL/MinIO/Redis/Qd
 | 项 | 说明 | 上线处理 |
 |----|------|---------|
 | `cmd/configtest/` | 配置自检工具，会打印 `JWT_SECRET`、`LLM_API_KEY` 等配置 | 删除或仅本地调试 |
-| `bin/api` | `nohup` 后台运行的编译产物 | 清理，改用 systemd / docker 正规进程托管 |
+| `bin/api` / `bin/worker` | `nohup`/后台运行的编译产物（API 与 Worker 独立二进制） | 清理，改用 systemd / docker 正规进程托管（可多实例扩容 Worker） |
 
 ### 3. 需改为生产配置
 | 项 | 当前（调试期）| 上线要求 |
