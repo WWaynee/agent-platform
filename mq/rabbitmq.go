@@ -2,6 +2,7 @@ package mq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -112,16 +113,30 @@ func Publish(queueName string, body []byte) error {
 	)
 }
 
+// ErrRequeue 哨兵错误：handler 返回的错误若包装了它（errors.Is(err, ErrRequeue) 为真），
+// 表示这条消息需要**重新入队**再试（Nack requeue=true）；否则一律 ACK 确认。
+//
+// 为什么区分"重试"与"最终失败"：
+//   - 像依赖的外部服务瞬时故障（LLM/Qdrant 抖动），值得重新入队重试；
+//   - 而业务性最终失败（如文档不存在、内容为空）无需无限重试，失败即 ACK 丢弃，
+//     避免消息在队列里无限循环消耗资源。
+var ErrRequeue = errors.New("mq: requeue")
+
 // Consume 注册一个消费函数，持续消费指定队列，并把每个消息投递到 handler。
 //
 // 参数：
 //   - queueName：队列名
-//   - handler：处理函数，返回 error。返回 nil 表示处理成功；非 nil 表示处理失败。
+//   - handler：处理函数，返回 error。
+//   - 返回 nil → 成功，Ack（消息移除）；
+//   - 返回包装了 ErrRequeue 的错误 → 需要重试，Nack(requeue=true) 重新入队；
+//   - 返回其他 error → 最终失败，也 Ack（确认丢弃，避免无限重复消费）；
+//   - handler 内部 panic → 也被捕获，视为最终失败 Ack，不让单条消息拖垮整个 worker。
 //
-// 手动 ACK 逻辑（保证消息不丢）：
-//   - handler 返回 nil → Acknowledge（确认，消息从队列移除）；
-//   - handler 返回 error → Nack(requeue=true)（不确认，消息重新入队，之后还能被再次消费处理）。
-//     这样即便处理失败，消息也不会丢，下次还能重试。
+// 手动 ACK + 失败即确认的设计（保证不无限循环）：
+//
+//	自动 ACK 会丢消息；而"失败一律 Nack requeue"又会让失败消息无限循环。
+//	本项目取折衷：只有显式声明需要重试（ErrRequeue）才重新入队，其余失败 Ack，
+//	既尽可能不丢重要任务，又避免死循环耗尽资源。
 //
 // ⚠️ 阻塞调用：本方法会持续消费，应在协程 goroutine 里运行。
 func Consume(queueName string, handler func([]byte) error) error {
@@ -129,20 +144,38 @@ func Consume(queueName string, handler func([]byte) error) error {
 		return fmt.Errorf("RabbitMQ 未初始化，请先调用 InitRabbitMQ")
 	}
 
-	// autoAck=false：手动 ACK，消费成功才确认，失败重新入队
+	// autoAck=false：手动 ACK
 	deliveries, err := MQCh.Consume(queueName, "", false, false, false, false, nil)
 	if err != nil {
 		return fmt.Errorf("创建消费器失败（queue=%s）: %w", queueName, err)
 	}
 
 	for d := range deliveries {
-		if err := handler(d.Body); err != nil {
-			// 处理失败：不确认，消息重新入队（requeue=true），下次还能处理
+		// 单个消息的处理（含 panic 捕获），返回未经包装的判断结果
+		processErr := safeProcess(handler, d.Body)
+
+		switch {
+		case processErr == nil:
+			// 成功：确认，消息移除
+			_ = d.Ack(false)
+		case errors.Is(processErr, ErrRequeue):
+			// 需要重试：不确认，消息重新入队，之后还能再消费
 			_ = d.Nack(false, true) // multiple=false, requeue=true
-			continue
+		default:
+			// 最终失败（或 panic 转成的错误）：也 Ack 确认丢弃，避免无限重复消费
+			_ = d.Ack(false)
 		}
-		// 处理成功：手动确认，消息从队列移除
-		_ = d.Ack(false)
 	}
 	return nil
+}
+
+// safeProcess 安全执行一次消息处理：捕获 handler 内部 panic，转成 error。
+// 这样某条消息如果 panic，不会向上传播把整个消费者协程打崩。
+func safeProcess(handler func([]byte) error, body []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("消费处理 panic: %v", r)
+		}
+	}()
+	return handler(body)
 }

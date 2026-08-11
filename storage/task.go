@@ -34,6 +34,24 @@ func UpdateTaskStatus(id uint64, status string, errMsg string) error {
 		}).Error
 }
 
+// UpdateTaskRetry 更新任务的重试次数、状态与错误信息（用于消费失败重试场景）。
+// 相比 UpdateTaskStatus 多递增 retry_count。
+//
+// 参数：
+//   - id：任务 ID
+//   - retryCount：累计重试次数
+//   - status：目标状态（重试期间的临时状态，如 processing/pending）
+//   - errMsg：本次失败的错误信息（供排查）
+func UpdateTaskRetry(id uint64, retryCount int, status string, errMsg string) error {
+	return DB.Model(&model.AgentTask{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"status":      status,
+			"error_msg":   errMsg,
+			"retry_count": retryCount,
+		}).Error
+}
+
 // GetTaskByID 按 ID 查询单个任务（带租户过滤）。
 // 查询同时满足 id 和 tenant_id，防止查到别的租户的任务。
 // 记录不存在时返回 nil，err 为 gorm.ErrRecordNotFound。
