@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"agent-platform/mq"
 	"agent-platform/storage"
 	"agent-platform/storage/model"
 
@@ -14,8 +15,8 @@ import (
 
 // ============ Service 层：文档业务逻辑 ============
 
-// UploadDocument 上传文档
-// 流程：上传文件到 MinIO → 构造文档元数据 → 写入 document 表 → 返回文档信息
+// UploadDocument 上传文档（异步化）
+// 流程：上传文件到 MinIO → 写文档表(pending) → 写任务表(pending) → 发 MQ 消息 → 立即返回
 //
 // 入参说明：
 //   - tenantID：从 JWT 上下文拿（多租户安全：绝不信前端传的 tenant_id）
@@ -24,9 +25,10 @@ import (
 //   - size：文件字节大小
 //   - file：文件内容流
 //
-// status 先设为 pending：本阶段只做上传，尚未做解析与向量化；
-// 待周六 RAG 阶段处理完成后，再改为 success（状态流转清晰，体现设计）。
-func UploadDocument(tenantID, userID uint64, filename string, size int64, file io.Reader) (*model.Document, error) {
+// ⚠️ 异步化：上传只落 3 处元数据并投递消息，解析与向量化交给后台消费者处理
+// （消费者从 mq 队列取消息 → 按 DocumentID 查文档 → 从 MinIO 拿文件 → 切片/向量/写库）。
+// 因此本方法立即返回，用户无需等解析完成，可随时通过任务/文档状态查询进度。
+func UploadDocument(tenantID, userID uint64, filename string, size int64, file io.Reader) (*model.Document, uint64, error) {
 	// 1. 生成唯一 objectKey：{tenant_id}/{timestamp}_{filename}
 	//    带 tenant_id 前缀：MinIO 内按租户分目录，方便管理与隔离
 	//    带 timestamp：防止同名文件相互覆盖
@@ -34,23 +36,42 @@ func UploadDocument(tenantID, userID uint64, filename string, size int64, file i
 
 	// 2. 上传文件到 MinIO（文件流直接透传，不落本地磁盘）
 	if err := storage.UploadFile(objectKey, file, size); err != nil {
-		return nil, fmt.Errorf("上传文件到 MinIO 失败: %w", err)
+		return nil, 0, fmt.Errorf("上传文件到 MinIO 失败: %w", err)
 	}
 
-	// 3. 构造文档元数据并写入 document 表
+	// 3. 写文档表（status=pending，待解析）
 	doc := &model.Document{
 		TenantID:       tenantID,
 		UserID:         userID,    // 上传者（当前登录用户）
 		Name:           filename,  // 前端原始文件名，用于展示
 		MinioObjectKey: objectKey, // MinIO 内的唯一存储路径
-		Status:         "pending", // 待解析（后续 RAG 阶段处理）
+		Status:         "pending", // 待解析（后台消费者完成后置为 success）
 		Size:           size,      // 文件字节大小
 	}
 	if err := storage.CreateDocument(doc); err != nil {
-		return nil, fmt.Errorf("写入文档记录失败: %w", err)
+		return nil, 0, fmt.Errorf("写入文档记录失败: %w", err)
 	}
 
-	return doc, nil
+	// 4. 写任务表（task_type=document_parse, biz_id=文档ID, status=pending）
+	task := &model.AgentTask{
+		TenantID: tenantID,
+		TaskType: "document_parse",
+		BizID:    doc.ID,    // 关联文档 ID
+		Status:   "pending", // 待消费
+	}
+	if err := storage.CreateTask(task); err != nil {
+		return nil, 0, fmt.Errorf("创建异步任务失败: %w", err)
+	}
+
+	// 5. 投递 MQ 消息（消息体只带 任务ID/租户ID/文档ID，消费者按 ID 去查库/取文件）
+	//    发送失败：文档已上传但进不了处理队列，把文档状态置为 failed 防止悬空
+	if err := mq.PublishDocumentParseTask(task.ID, tenantID, doc.ID); err != nil {
+		_ = storage.UpdateDocumentStatus(doc.ID, "failed")
+		return nil, 0, fmt.Errorf("投递异步任务消息失败: %w", err)
+	}
+
+	// 6. 立即返回文档（status=pending，后台异步处理中）
+	return doc, task.ID, nil
 }
 
 // ListDocuments 分页查询文档列表

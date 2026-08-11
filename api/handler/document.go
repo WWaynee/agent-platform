@@ -66,19 +66,20 @@ func UploadDocument(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// 6. 调用业务层上传
-	doc, err := service.UploadDocument(tenantID, userID, fileHeader.Filename, fileHeader.Size, file)
+	// 6. 调用业务层上传（异步：写文档表+任务表+投递 MQ 后立即返回）
+	doc, taskID, err := service.UploadDocument(tenantID, userID, fileHeader.Filename, fileHeader.Size, file)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
 	}
 
-	// 7. 返回上传结果
+	// 7. 返回上传结果（status=pending，后台异步解析中）
 	response.Success(c, gin.H{
 		"id":        doc.ID,
 		"name":      doc.Name,   // 文件名
 		"status":    doc.Status, // pending
 		"tenant_id": doc.TenantID,
+		"task_id":   taskID, // 关联的异步任务 ID（可用它查询处理进度）
 	})
 }
 
