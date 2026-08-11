@@ -1,13 +1,12 @@
 package handler
 
 import (
-	"strings"
-
 	"github.com/gin-gonic/gin"
 
 	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 	"agent-platform/api/service"
+	"agent-platform/api/validator"
 )
 
 // ============ 知识库检索测试接口 ============
@@ -20,8 +19,8 @@ import (
 
 // SearchRequest 知识库检索请求（JSON body）
 type SearchRequest struct {
-	Query string `json:"query"`         // 查询文本（必填，不能为空）
-	TopK  int    `json:"top_k"`         // 期望返回的片段条数；<=0 时服务层默认取 3
+	Query string `json:"query" binding:"required,min=1,max=500"` // 查询文本（必填，长度 1~500）
+	TopK  int    `json:"top_k"`                                  // 期望返回的片段条数；<=0 时服务层默认取 3
 }
 
 // KnowledgeSearch 知识库检索
@@ -37,15 +36,10 @@ func KnowledgeSearch(c *gin.Context) {
 		return
 	}
 
-	// 2. 解析请求体
+	// 2. 解析请求体（标签校验：query 必填）
 	var req SearchRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "参数错误: "+err.Error())
-		return
-	}
-	// 查询文本不能为空
-	if strings.TrimSpace(req.Query) == "" {
-		response.BadRequest(c, "query 不能为空")
+	if err := validator.BindJSON(c, &req); err != nil {
+		validator.HandleBindError(c, err)
 		return
 	}
 
@@ -58,9 +52,9 @@ func KnowledgeSearch(c *gin.Context) {
 
 	// 4. 返回结果
 	response.Success(c, gin.H{
-		"query":    req.Query,
-		"top_k":    len(hits),
+		"query":     req.Query,
+		"top_k":     len(hits),
 		"tenant_id": tenantID,
-		"results":  hits,
+		"results":   hits,
 	})
 }

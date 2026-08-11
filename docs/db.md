@@ -88,10 +88,11 @@ CREATE TABLE `audit_logs` (
 CREATE TABLE `tenant_tool_configs` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `tenant_id` bigint unsigned NOT NULL,
-  `tool_name` varchar(128) NOT NULL,
-  `is_enable` tinyint(1) NOT NULL DEFAULT '1',
+  `tool_name` varchar(128) NOT NULL COMMENT '工具标识，与 Tool.Name() 对应',
+  `is_enable` tinyint(1) DEFAULT NULL COMMENT '是否开启（bool 零值处理见代码注释，不加 default 以免关闭操作被列默认值覆盖）',
   `created_at` datetime(3) DEFAULT NULL,
   `updated_at` datetime(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_tenant_tool` (`tenant_id`,`tool_name`),
   KEY `idx_tenant_tool_configs_tenant_id` (`tenant_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='租户工具权限';

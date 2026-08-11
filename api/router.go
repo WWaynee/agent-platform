@@ -66,11 +66,24 @@ func NewRouter() *gin.Engine {
 		private.GET("/session/list", handler.GetSessionList)  // 会话列表（只当前用户）
 		private.DELETE("/session/:id", handler.DeleteSession) // 删除会话（只删自己的）
 
-		// 租户管理（创建/查询租户都需登录）
-		private.POST("/tenant", handler.CreateTenant)                 // 创建租户
-		private.GET("/tenant/list", handler.ListTenants)              // 租户列表
-		private.GET("/tenant/:id", handler.GetTenantDetail)           // 租户详情
-		private.PUT("/tenant/:id/status", handler.UpdateTenantStatus) // 更新状态
+		// 租户查询/创建（需登录）
+		private.POST("/tenant", handler.CreateTenant)       // 创建租户
+		private.GET("/tenant/list", handler.ListTenants)    // 租户列表
+		private.GET("/tenant/:id", handler.GetTenantDetail) // 租户详情
+
+		// ===== 管理员专属路由组（JWT 先鉴权 → 再 AdminAuth，仅 admin 可调）=====
+		admin := private.Group("/admin")
+		admin.Use(middleware.AdminAuth())
+		{
+			// 工具配置查询/修改（租户管理员管理端）
+			admin.GET("/tool-config", handler.GetToolConfigList)           // 当前租户所有工具开关状态
+			admin.PUT("/tool-config/:tool_name", handler.UpdateToolConfig) // 开关某个工具
+
+			// 租户状态管理（启/停租户，仅管理员）
+			admin.PUT("/tenant/:id/status", handler.UpdateTenantStatus) // 更新租户状态（0 禁用 / 1 启用）
+
+			// 用户管理、用量统计：后续阶段补充（统一放本组即自动受管理员中间件保护）
+		}
 	}
 
 	return r

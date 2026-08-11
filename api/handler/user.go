@@ -1,13 +1,12 @@
 package handler
 
 import (
-	"strings"
-
 	"github.com/gin-gonic/gin"
 
 	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 	"agent-platform/api/service"
+	"agent-platform/api/validator"
 	"agent-platform/util"
 )
 
@@ -15,17 +14,17 @@ import (
 
 // RegisterReq 用户注册请求
 type RegisterReq struct {
-	TenantID uint64 `json:"tenant_id" binding:"required"` // 租户 ID
-	Username string `json:"username" binding:"required"`  // 用户名
-	Password string `json:"password" binding:"required"`  // 密码
-	Role     string `json:"role" binding:"required"`      // 角色：admin / member
+	TenantID uint64 `json:"tenant_id" binding:"required"`                // 租户 ID
+	Username string `json:"username" binding:"required,min=2,max=64"`    // 用户名
+	Password string `json:"password" binding:"required,min=6,max=128"`   // 密码
+	Role     string `json:"role" binding:"omitempty,oneof=admin member"` // 角色（可选，默认 member；仅允许 admin/member，防注非法角色）
 }
 
 // LoginReq 用户登录请求
 type LoginReq struct {
-	TenantID uint64 `json:"tenant_id" binding:"required"` // 租户 ID
-	Username string `json:"username" binding:"required"`  // 用户名
-	Password string `json:"password" binding:"required"`  // 密码
+	TenantID uint64 `json:"tenant_id" binding:"required"`              // 租户 ID
+	Username string `json:"username" binding:"required,min=2,max=64"`  // 用户名
+	Password string `json:"password" binding:"required,min=6,max=128"` // 密码
 }
 
 // ============ Handler 函数 ============
@@ -33,13 +32,8 @@ type LoginReq struct {
 // Register 用户注册
 func Register(c *gin.Context) {
 	var req RegisterReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "参数错误: "+err.Error())
-		return
-	}
-	// 密码不能为空字符串
-	if strings.TrimSpace(req.Password) == "" {
-		response.BadRequest(c, "密码不能为空")
+	if err := validator.BindJSON(c, &req); err != nil {
+		validator.HandleBindError(c, err)
 		return
 	}
 
@@ -55,8 +49,8 @@ func Register(c *gin.Context) {
 // Login 用户登录
 func Login(c *gin.Context) {
 	var req LoginReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "参数错误: "+err.Error())
+	if err := validator.BindJSON(c, &req); err != nil {
+		validator.HandleBindError(c, err)
 		return
 	}
 

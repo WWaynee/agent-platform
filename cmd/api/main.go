@@ -69,6 +69,8 @@ func main() {
 	}
 	// 注入 tenant_tool_config 白名单权限校验（未显式开启的工具会被拦截）
 	tm.SetPermissionChecker(service.NewDBPermissionChecker())
+	// 注入工具管理器到 handler（admin 工具开关接口遍历已注册工具及其描述用）
+	handler.SetToolManager(tm)
 	{
 		names := make([]string, 0, len(tm.ListTools()))
 		for _, t := range tm.ListTools() {

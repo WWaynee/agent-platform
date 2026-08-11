@@ -335,13 +335,39 @@
 
 #### 周二・权限管控 & 参数校验
 
-- [ ] 租户工具白名单配置
-- [ ] Agent 调用工具前校验权限
-- [ ] 未授权工具直接拦截
-- [ ] 完善接口参数校验
-- [ ] 非法参数请求拦截
-- [ ] 测试：未授权工具，Agent 无法调用
-- [ ] 测试：非法参数返回 400，服务不崩溃
+- [x] 租户工具白名单配置
+- [x] Agent 调用工具前校验权限
+- [x] 未授权工具直接拦截
+- [x] 完善接口参数校验
+- [x] 非法参数请求拦截
+- [x] 测试：未授权工具，Agent 无法调用
+- [x] 测试：非法参数返回 400，服务不崩溃
+
+#### 📌 周二遇到的问题与解决方案
+
+1. **"查不到配置"的默认策略要双保险**：既要兼容老租户（未初始化配置）不误拦截，又要让新租户在管理端能看到可管理的开关。
+   → 新租户创建时显式初始化默认开启记录；老租户/新增工具查不到记录时，权限层**查不到即默认放行**。判断口径统一收敛在权限层一处，storage 只做纯 CRUD，职责清晰不打架。
+
+2. **bool 开关字段的 gorm 默认值陷阱**：`IsEnable` 一旦带 `default:true` 标签，会因 bool 零值(false) 被 gorm 当"未赋值"而覆盖成 true，导致"关闭"操作失效、权限校验失灵。
+   → 去掉该默认值标签（含 DB 层列默认值）。教训：bool 开关字段的默认值标签要格外小心。
+
+3. **权限校验位置要收敛，不能散落各 handler**：工具权限若在各自 handler 判断容易漏，也和"插件化工具"设计冲突。
+   → 工具权限统一放 **ToolManager 执行前**（通过 PermissionChecker 接口注入，所有工具调用天然拦截）；接口权限（admin）统一放**路由组中间件**，管理接口挂到 admin 组即自动受保护。
+
+4. **参数校验的"两套标签"问题**：项目既有结构体全用 Gin 的 `binding:` 标签，统一校验引擎也用它。
+   → 统一沿用 `binding:` 一套标签，让结构体既能被 Gin 识别、也能被统一引擎识别，避免"两套标签 + 双引擎"混乱。
+
+5. **required 对数值得零值会误判**：租户状态 `status=0(禁用)` 是合法值，但 `required` 会把它当"未传"拦截。
+   → 改用 `oneof=0 1`：既不误伤合法零值，又能拦截非法取值。
+
+6. **统一校验错误要返回"具体哪个字段错 + 为什么错"**：仅返回 `400 参数错误` 前端无法定位。
+   → 校验失败返回结构化字段错误 `data:{username:"…", password:"…"}`：字段名用 json/form 标签键，错误为中文提示（区分必填/字符串长度/数值 min/max/取值）。所有 handler 一行统一出口收敛，不再手写。
+
+7. **只校验绑定、不校验"业务语义"**：校验标签能拦空值/长度，但拦不住"配置一个不存在的工具名"这类业务错误。
+   → 写库前先校验工具是否已注册，未注册直接 400，避免把垃圾配置写进白名单表。
+
+8. **多租户隔离必须在数据层死守**：租户 A 关闭工具不能影响租户 B。
+   → 工具配置所有 CRUD 强制租户过滤，按租户独立开关，联合唯一约束保证同租户工具不重复。实测租户间互不影响。
 
 #### 周三・限流 & 用量统计
 
@@ -459,18 +485,21 @@ agent-platform/
 │   └── config.go              # 全局配置：读取 .env，注入 MySQL/Redis/MinIO/Qdrant/JWT/LLM/Server
 │
 ├── api/                       # HTTP 接口层（Gin）
-│   ├── router.go              #   路由注册：公开组（health/注册/登录）与私有组（JWT 鉴权）
-│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go / session.go / task.go
+│   ├── router.go              #   路由注册：公开组 / 私有组（JWT 鉴权）/ 管理组 admin（JWT+AdminAuth）
+│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go / session.go / task.go / tool_admin.go
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
 │   │   ├── task.go            #   异步任务消费编排 ConsumeDocumentParseTask（任务+文档状态流转、重试计数、
 │   │   │                      #   幂等短路） + 任务详情查询 GetTaskDetail
 │   │   ├── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
-│   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单，默认开启知识库工具）
+│   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单：显式关闭即拒，查不到默认放行）
+│   │   ├── tool_admin.go      #   工具开关配置（租户管理）：GetToolEnabled / UpdateToolEnabled（查不到默认启用）
 │   │   └── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
-│   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / context
+│   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / admin / context
 │   ├── response/              #   统一返回格式与错误码工具
+│   ├── validator/             #   统一参数校验（go-playground/validator v10）：BindJSON 绑定+校验
+│   │                          #   + HandleBindError 统一出口（校验失败返回 400 + 结构化字段错误 data）
 │   └── .gitkeep
 │
 ├── storage/                   # 数据持久化层
@@ -483,7 +512,7 @@ agent-platform/
 │   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）
 │   ├── session.go             #   会话 CRUD：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,更新时间倒序) / DeleteSession(软删)
 │   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / UpdateTaskRetry / GetTaskByID / ListTasks(分页)
-│   └── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / SetToolConfig upsert）
+│   └── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / ListToolConfigs / UpdateToolConfig / InitDefaultToolConfigs）
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
 │   └── splitter.go
@@ -639,8 +668,10 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
    - 后续：改造为**受控 CORS**，允许前端域名白名单跨域，其余来源拒绝
 
 8. **参数校验不统一**
-   - 现状：**部分已有** — 用户注册/登录已用结构体 `binding:"required"` 标签 + `ShouldBindJSON`，但其余 handler（如租户接口）仍各自手写校验
-   - 后续：统一用 `validator` 库做结构体标签校验，覆盖所有 handler，统一参数错误处理
+   - 现状：**已统一** — 引入 `api/validator` 包（go-playground/validator v10），所有 JSON 请求结构体加 `binding` 校验标签（required/min/max/oneof 等），handler 统一走 `validator.BindJSON` + `validator.HandleBindError`；分页 query 参数也加了 min/max 标签
+   - **统一校验错误处理**：校验失败返回**结构化字段错误**——`{"code":400,"message":"参数校验失败","data":{"username":"该字段为必填项，不能为空","password":"长度不能少于 6 个字符"}}`，字段 key 用的是 json/form 标签名，错误消息为中文提示（区分字符串长度与数值 min/max、oneof 取值、required 必填等），前端可精确定位错误字段
+   - 其它绑定失败（空体 / JSON 格式错）返回 400 通用提示
+   - 已替换：user/tenant/chat/knowledge/session/tool_admin 各 handler 的手写 `if` 校验全部移除，改为标签式校验 + 统一出口
 
 9. **migrate 工具配置重复**
    - 现状：migrate 工具自己读 `.env`，api 服务也读 `.env`

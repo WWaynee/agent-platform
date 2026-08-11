@@ -83,8 +83,8 @@ type AuditLog struct {
 // tenant_tool_config 租户工具权限配置
 type TenantToolConfig struct {
 	ID       uint64 `gorm:"primaryKey"`
-	TenantID uint64 `gorm:"index;not null"`
-	ToolName string `gorm:"size:128;not null;comment:工具标识，knowledge_retrieve"`
+	TenantID uint64 `gorm:"uniqueIndex:idx_tenant_tool;not null"`
+	ToolName string `gorm:"size:128;not null;uniqueIndex:idx_tenant_tool;comment:工具标识，knowledge_retrieve"`
 	// 不要用 `default:true`：bool 零值是 false，加 default 后 gorm 会把显式
 	// 关闭(false)当"未赋值"而替换成列默认值 true，导致关闭权限校验失效。
 	IsEnable  bool `gorm:"comment:是否开启"`

@@ -87,8 +87,8 @@ func UploadDocument(c *gin.Context) {
 
 // ListDocumentsReq 文档分页列表请求（query 参数）
 type ListDocumentsReq struct {
-	Page     int `form:"page"`
-	PageSize int `form:"page_size"`
+	Page     int `form:"page" binding:"omitempty,min=1"`              // 页码，从 1 起（0 或空则用默认值）
+	PageSize int `form:"page_size" binding:"omitempty,min=1,max=100"` // 每页条数，1~100
 }
 
 // ============ Handler 函数 ============

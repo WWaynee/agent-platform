@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -17,16 +18,35 @@ import (
 // 不直接写 SQL，通过 storage 层访问数据库。
 
 // CreateTenant 创建租户
-// 业务逻辑：构造租户对象 → 插入数据库 → 返回租户记录
-// TODO(后续)：创建租户时初始化默认工具配置（tenant_tool_config）
-func CreateTenant(name string) (*model.Tenant, error) {
+// 业务逻辑：创建租户 → 自动创建该租户首个管理员账号（role=admin）→ 初始化默认工具配置。
+//
+// 租户首个用户默认是管理员：租户建好后，系统自动以 adminUsername/adminPassword
+// 建一个 role=admin 的用户，作为该租户的管理员入口。普通自助注册则一律是 member。
+func CreateTenant(name, adminUsername, adminPassword string) (*model.Tenant, error) {
+	// admin 账号默认值兜底（调用方未传则用 admin / admin123）
+	if strings.TrimSpace(adminUsername) == "" {
+		adminUsername = "admin"
+	}
+	if strings.TrimSpace(adminPassword) == "" {
+		adminPassword = "admin123"
+	}
+
 	tenant := &model.Tenant{
 		Name:   name,
 		Status: 1, // 默认启用
 	}
-
 	if err := storage.CreateTenant(tenant); err != nil {
 		return nil, fmt.Errorf("创建租户失败: %w", err)
+	}
+
+	// 自动创建租户首个管理员账号（传 role=admin 创建管理员）
+	if _, err := Register(tenant.ID, adminUsername, adminPassword, "admin"); err != nil {
+		return tenant, fmt.Errorf("租户已创建，但创建管理员账号失败: %w", err)
+	}
+
+	// 初始化该租户的默认工具配置（默认都开启）
+	if err := storage.InitDefaultToolConfigs(tenant.ID); err != nil {
+		return tenant, fmt.Errorf("租户已创建，但初始化默认工具配置失败: %w", err)
 	}
 
 	return tenant, nil

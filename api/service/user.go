@@ -15,6 +15,9 @@ import (
 
 // Register 用户注册
 // 流程：校验用户名是否已存在 → 密码 bcrypt 哈希 → 插入数据库 → 返回用户
+//
+// 角色规则：注册接口默认创建的是普通成员 member。只有调用方显式传 "admin" 才会创建管理员
+// （例如租户创建时由系统自动给租户建首个 admin；普通注册一律 member，防止自助注册提权）。
 func Register(tenantID uint64, username, password, role string) (*model.User, error) {
 	// 1. 先查该租户下用户名是否已存在
 	_, err := storage.GetUserByUsername(tenantID, username)
@@ -32,7 +35,12 @@ func Register(tenantID uint64, username, password, role string) (*model.User, er
 		return nil, fmt.Errorf("密码加密失败: %w", err)
 	}
 
-	// 3. 构造用户并插入
+	// 3. 角色兜底：未显式指定则默认普通成员
+	if role == "" {
+		role = "member"
+	}
+
+	// 4. 构造用户并插入
 	user := &model.User{
 		TenantID:     tenantID,
 		Username:     username,

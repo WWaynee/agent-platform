@@ -2,32 +2,34 @@ package handler
 
 import (
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"agent-platform/api/response"
 	"agent-platform/api/service"
+	"agent-platform/api/validator"
 )
 
 // ============ 请求参数结构体 ============
 
 // CreateTenantReq 创建租户请求
 type CreateTenantReq struct {
-	Name string `json:"name" binding:"required"` // 租户名称
+	Name          string `json:"name" binding:"required,min=1,max=64"` // 租户名称（必填，长度 1~64）
+	AdminUsername string `json:"admin_username"`                       // 该租户首个管理员用户名（可选，默认 admin）
+	AdminPassword string `json:"admin_password"`                       // 该租户首个管理员密码（可选，默认 admin123）
 }
 
 // ListTenantsReq 租户分页列表请求（query 参数）
 type ListTenantsReq struct {
-	Page     int `form:"page"`
-	PageSize int `form:"page_size"`
+	Page     int `form:"page" binding:"omitempty,min=1"`              // 页码，从 1 起
+	PageSize int `form:"page_size" binding:"omitempty,min=1,max=100"` // 每页条数，1~100
 }
 
 // UpdateTenantStatusReq 更新租户状态请求
-// 注意：不能用 binding:"required" 拦截状态，因为 status=0(禁用)是合法值，
-// 而 required 对数值零值会误判为"未传"。因此靠 handler 内手动校验 0/1。
+// 用 oneof 限制只能取 0 或 1（不能用 required：status=0(禁用)是合法值，
+// required 会对数值零值误判为"未传"；oneof 允许 0）。
 type UpdateTenantStatusReq struct {
-	Status int8 `json:"status"` // 状态：1 启用 / 0 禁用
+	Status int8 `json:"status" binding:"oneof=0 1"` // 状态：1 启用 / 0 禁用
 }
 
 // ============ Handler 函数 ============
@@ -35,18 +37,12 @@ type UpdateTenantStatusReq struct {
 // CreateTenant 创建租户
 func CreateTenant(c *gin.Context) {
 	var req CreateTenantReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "参数错误: "+err.Error())
+	if err := validator.BindJSON(c, &req); err != nil {
+		validator.HandleBindError(c, err)
 		return
 	}
 
-	// 参数校验：租户名称不能为空
-	if strings.TrimSpace(req.Name) == "" {
-		response.BadRequest(c, "租户名称不能为空")
-		return
-	}
-
-	tenant, err := service.CreateTenant(req.Name)
+	tenant, err := service.CreateTenant(req.Name, req.AdminUsername, req.AdminPassword)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
@@ -104,14 +100,8 @@ func UpdateTenantStatus(c *gin.Context) {
 	}
 
 	var req UpdateTenantStatusReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "参数错误: "+err.Error())
-		return
-	}
-
-	// 参数校验：状态值只能是 0 或 1
-	if req.Status != 0 && req.Status != 1 {
-		response.BadRequest(c, "状态值只能为 0(禁用)或 1(启用)")
+	if err := validator.BindJSON(c, &req); err != nil {
+		validator.HandleBindError(c, err)
 		return
 	}
 

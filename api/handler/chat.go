@@ -10,6 +10,7 @@ import (
 	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 	"agent-platform/api/service"
+	"agent-platform/api/validator"
 )
 
 // ============ 对话接口 ============
@@ -33,8 +34,8 @@ func SetAgentEngine(e *engine.ReActEngine) {
 
 // ChatRequest 对话请求
 type ChatRequest struct {
-	SessionID string `json:"session_id"` // 会话 ID（数据库会话主键的字符串形式；空则自动创建新会话）
-	Query     string `json:"query"`      // 用户提问（必填，不能为空）
+	SessionID string `json:"session_id"`                              // 会话 ID（数据库会话主键的字符串形式；空则自动创建新会话）
+	Query     string `json:"query" binding:"required,min=1,max=2000"` // 用户提问（必填，长度 1~2000）
 }
 
 // defaultSessionTitle 新会话的默认标题：取首句话前 N 个字，便于列表辨识
@@ -66,14 +67,10 @@ func Chat(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 	userID := middleware.GetUserID(c)
 
-	// 3. 解析请求体
+	// 3. 解析请求体（标签校验：query 必填）
 	var req ChatRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "参数错误: "+err.Error())
-		return
-	}
-	if strings.TrimSpace(req.Query) == "" {
-		response.BadRequest(c, "query 不能为空")
+	if err := validator.BindJSON(c, &req); err != nil {
+		validator.HandleBindError(c, err)
 		return
 	}
 

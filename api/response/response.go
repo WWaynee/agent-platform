@@ -73,6 +73,16 @@ func BadRequest(c *gin.Context, message string) {
 	Fail(c, CodeBadRequest, message)
 }
 
+// BadRequestValidation 400 参数校验失败（结构化）。
+// data 携带具体字段错误：{"username":"...", "password":"..."}，前端可精确定位错误字段。
+func BadRequestValidation(c *gin.Context, fieldErrors map[string]string) {
+	c.JSON(http.StatusOK, Body{
+		Code:    CodeBadRequest,
+		Message: "参数校验失败",
+		Data:    fieldErrors,
+	})
+}
+
 // Unauthorized 401 未登录
 // 鉴权失败是 HTTP 层面的问题，名字与行为一致：返回真正的 HTTP 401，前端拦截器据此跳转登录
 func Unauthorized(c *gin.Context, message string) {

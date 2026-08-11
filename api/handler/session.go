@@ -9,6 +9,7 @@ import (
 	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 	"agent-platform/api/service"
+	"agent-platform/api/validator"
 )
 
 // ============ 会话接口 ============
@@ -21,7 +22,7 @@ import (
 
 // CreateSessionRequest 创建会话请求体
 type CreateSessionRequest struct {
-	Title string `json:"title"` // 会话标题（可不传，空则用默认标题）
+	Title string `json:"title" binding:"omitempty,max=100"` // 会话标题（可不传，空则用默认标题；最多 100 字）
 }
 
 // CreateSession 创建会话
@@ -40,8 +41,8 @@ func CreateSession(c *gin.Context) {
 	}
 
 	var req CreateSessionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "参数错误: "+err.Error())
+	if err := validator.BindJSON(c, &req); err != nil {
+		validator.HandleBindError(c, err)
 		return
 	}
 	title := strings.TrimSpace(req.Title)
@@ -63,8 +64,8 @@ func CreateSession(c *gin.Context) {
 
 // ListSessionReq 会话列表请求（query 参数）
 type ListSessionReq struct {
-	Page     int `form:"page"`
-	PageSize int `form:"page_size"`
+	Page     int `form:"page" binding:"omitempty,min=1"`              // 页码，从 1 起
+	PageSize int `form:"page_size" binding:"omitempty,min=1,max=100"` // 每页条数，1~100
 }
 
 // GetSessionList 会话列表
