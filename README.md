@@ -305,10 +305,10 @@
 #### 周一・异步任务 & MQ
 
 - [x] docker-compose 启用 RabbitMQ
-- [ ] 封装 MQ 生产者
-- [ ] 实现协程消费者
-- [ ] 文档解析任务投递队列
-- [ ] 任务状态管理：pending / running / success / failed
+- [x] 封装 MQ 生产者
+- [x] 实现协程消费者
+- [x] 文档解析任务投递队列
+- [x] 任务状态管理：pending / running / success / failed
 - [x] 任务状态查询接口
 - [ ] 测试：提交异步任务，状态正确流转
 - [ ] 测试：任务失败，记录错误信息
@@ -427,6 +427,7 @@ agent-platform/
 │
 ├── cmd/                       # 可执行程序入口（各独立 main）
 │   ├── api/                   #   主服务入口：加载配置 → 连 MySQL/Redis/MinIO → 启动 Gin
+│   ├── worker/                #   独立消费者进程：初始化中间件 → 监听 document_parse 队列，异步执行文档解析
 │   ├── migrate/               #   数据库迁移工具（建表 / 加列 / 建索引）
 │   ├── configtest/            #   配置自检工具（未配置输出调试日志，仅本地用）
 │   ├── llm-demo/              #   llmclient 演示：go run ./cmd/llm-demo chat|embed
