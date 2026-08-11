@@ -315,26 +315,23 @@
 
 #### 📌 周一遇到的问题与解决方案
 
-1. **消费失败「无限循环」与「丢消息」的权衡（MQ ACK 策略）**：最朴素的写法是"成功 Ack、失败 Nack(requeue=true)"——失败消息会无限重入队重试，占满队列白耗资源；而"失败也 Ack"又会直接丢弃潜在可恢复的任务。两者都不可取。
-   → 解决：引入哨兵错误 `mq.ErrRequeue` 区分两种情况——**显式声明需要重试**才 `Nack(requeue=true)`，其余失败（业务性失败、解析失败等）一律 `Ack` 确认丢弃避免死循环。重试决策下沉到 service：失败时累加 `retry_count`，未到上限（`maxTaskRetry=3`）返回包装 `ErrRequeue` 的错误让消息重入队，达到上限才置 `failed` 并 Ack。既尽量不丢任务，又杜绝无限循环。
-   ⚠️ 注意点：**失败必须也要 ACK**，否则坏消息（如无法反序列化）会卡在队列头部反复消费、阻塞后面所有正常消息。
+1. **失败可重试 vs 防死循环**：失败一律 Nack 会无限重试占满队列，一律 Ack 又会丢可恢复任务。
+   → 引入哨兵错误 `mq.ErrRequeue`：显式声明可重试才 `Nack(requeue=true)`，其余失败（含坏消息/解析失败）一律 Ack 防死循环；service 累加 `retry_count`，未到上限（3次）重入队，到上限置 `failed`。
 
-2. **单条消息 panic 会拖垮整个 Worker（健壮性）**：consumer 的 handler 若内部 panic，向上传播会崩掉整个消费协程，再往上是整个 Worker 进程，队列也会因消息被 Unacked 而积压。
-   → 解决：`mq.Consume` 里加 `safeProcess`（defer + recover），把 handler 的 panic `recover()` 捕获转成 error，按失败处理并继续消费下一条。实测投递非法 JSON 消息 → worker 打印"解析消息体失败"但进程存活、后续正常消息照常处理。
+2. **单条消息 panic 会拖垮 Worker**：handler panic 会崩掉消费协程甚至整个 Worker。
+   → `mq.Consume` 用 `safeProcess`（defer/recover）把 panic 转成 error 按失败处理；实测投递非法消息 worker 不崩、后续消息照常处理。
 
-3. **Worker 与 API 同进程耦合的问题 → 拆独立进程**：解析是重活（读文件+切片+Embedding+写Qdrant），若放 API 进程里，一条大文档就会阻塞整个 API。且文档解析出故障会影响请求链路。
-   → 解决：单独 `cmd/worker` 独立进程，只初始化解析所需中间件（MySQL/MinIO/Qdrant/LLM/RabbitMQ）+ 注册消费者，阻塞消费。API 只负责接请求、落地任务记录、投 MQ 消息。两者零共享可独立启停、**多开 worker 即为横向扩容**（RabbitMQ work queue 自动分发）。
-   ⚠️ 注意点：`go run` 启动会残留编译子进程，调试重启要用 `pkill -f exe/main` / 编译 `bin/worker` 后精确 `kill $PID`，否则旧进程还在消费会干扰测试。
+3. **重活不能阻塞 API → 拆独立 Worker**：解析（读文件+切片+Embedding+写Qdrant）是重活。
+   → 单独 `cmd/worker` 进程，只初始化解析所需中间件并阻塞消费；API 只管接请求、落任务、发 MQ。两者独立启停，**多开 worker 即横向扩容**。
 
-4. **消息持久化 + 手动 ACK（不丢消息）**：默认队列与消息都是非持久化的，RabbitMQ 一重启消息全丢；自动 ACK 下消费者处理中崩溃，消息也直接丢。
-   → 解决：`QueueDeclare(durable=true)` + `Publish` 时 `DeliveryMode=amqp.Persistent`（双保险，RabbitMQ 重启消息重启后可恢复）；消费端 `autoAck=false` 手动 ACK。实测：worker 停机时上传 → 消息持久化积压 ready=1 → 重启 worker → 消费恢复并置 success，零丢失。
+4. **消息持久化 + 手动 ACK（不丢消息）**：默认非持久化且自动 ACK 都会丢消息。
+   → `QueueDeclare(durable=true)` + `DeliveryMode=Persistent` + `autoAck=false`。实测 worker 停机时上传→消息积压→重启后消费成功，零丢失。
 
-5. **重复消费必须幂等（重试/ACK前崩溃）**：同一条消息可能被消费多次（失败重入队、ACK 前 worker 崩溃、手动重复投递），若每次处理都重新切片/Embedding/写库，会重复消耗 LLM 费用且短时间写重复向量点。
-   → 解决：消费入口 `ConsumeDocumentParseTask` 先查文档状态，**已是 `success` 直接跳过解析**、把任务置 success 即返回。配合 `ProcessDocument` 用 `(documentID<<32)|chunkIndex` 合成点 ID 的 upsert 覆盖写，双重保证幂等。实测重复投递同一条已成功任务 → Qdrant 点数不变、不重复向量化。
+5. **重复消费要幂等**：同条消息可能被消费多次（重试/ACK前崩溃），重复向量化浪费且写重。
+   → 消费入口先查文档状态，**已 success 直接跳过**；配合点 ID `(documentID<<32)|chunkIndex` 的 upsert 覆盖写，双重保证幂等。
 
-6. **任务/文档状态流转要成对更新**：解析失败时不仅是任务要 `failed`，文档状态也要 `failed` 并记录 error_msg，供列表/详情展示失败原因；成功时两者都要 `success`。
-   → 解决：`ConsumeDocumentParseTask` 统一编排——置 processing → `ProcessDocument`（内部落文档 success/failed）→ 按结果同步任务 success/failed + error_msg + retry_count。新增 `storage.UpdateTaskRetry` 同时更新 `retry_count / status / error_msg`。
-   → 自测全通过：正常上传 pending→success ✅；空文件 → 任务+文档双 failed、error_msg="文档内容为空，无可切片文本"、retry_count=2 ✅；租户隔离（B 查 A 的任务返回"任务不存在"）✅；并发上传 5 份全 success、Qdrant 各有向量、零丢消息 ✅。
+6. **任务/文档状态需成对流转**：成败都要同步任务与文档状态并记 error_msg。
+   → `ConsumeDocumentParseTask` 统一编排 processing→结果；新增 `UpdateTaskRetry` 同更 `retry_count/status/error_msg`。自测：成功流转、空文件双 failed+错误信息、租户隔离、并发 5 份全 success 零丢失，全部通过 ✅。
 
 #### 周二・权限管控 & 参数校验
 
