@@ -85,16 +85,41 @@ type ServerConfig struct {
 	HTTPPort int // HTTP 监听端口
 }
 
+// RateLimitConfig 限流配置（滑动窗口，Redis 分布式实现）
+type RateLimitConfig struct {
+	TenantPerMin int // 每个租户每分钟最大请求数（所有私有接口合计），默认 300
+	UserPerMin   int // 每个用户每分钟最大请求数（单个用户），默认 60
+	ChatPerMin   int // 对话接口单独更严格地限流（调 LLM 成本高），默认 20
+	WindowSec    int // 滑动窗口时长（秒），默认 60
+	// KeyTTL 限流 key 过期时间（秒），默认比窗口大一点（如 window*2），用于自动清理
+	KeyTTL int
+}
+
+// QuotaConfig 租户配额配置（token 配额，须在配额拦截处使用）
+type QuotaConfig struct {
+	// DefaultMonthlyToken 新租户默认的每月 token 配额（0 表示不限制）
+	DefaultMonthlyToken int64
+}
+
+// UsageConfig 用量统计配置（Redis 实时按天计数，不做 MySQL 持久化）
+type UsageConfig struct {
+	// RedisTTL 用量 key 过期天数（保留最近 N 天历史），默认 30
+	RedisTTL int
+}
+
 // Config 全局配置根结构体
 type Config struct {
-	MySQL    MySQLConfig
-	Redis    RedisConfig
-	MinIO    MinIOConfig
-	Qdrant   QdrantConfig
-	JWT      JWTConfig
-	LLM      LLMConfig
-	RabbitMQ RabbitMQConfig
-	Server   ServerConfig
+	MySQL     MySQLConfig
+	Redis     RedisConfig
+	MinIO     MinIOConfig
+	Qdrant    QdrantConfig
+	JWT       JWTConfig
+	LLM       LLMConfig
+	RabbitMQ  RabbitMQConfig
+	Server    ServerConfig
+	RateLimit RateLimitConfig
+	Quota     QuotaConfig
+	Usage     UsageConfig
 }
 
 // GlobalConfig 全局配置实例，程序启动时加载一次
@@ -174,6 +199,25 @@ func Load() error {
 	// Server
 	cfg.Server = ServerConfig{
 		HTTPPort: getEnvInt("SERVER_HTTP_PORT", 8080),
+	}
+
+	// 限流（滑动窗口，Redis 分布式）：租户/用户/对话三层阈值 + 窗口时长
+	cfg.RateLimit = RateLimitConfig{
+		TenantPerMin: getEnvInt("RATE_LIMIT_TENANT_PER_MIN", 300),
+		UserPerMin:   getEnvInt("RATE_LIMIT_USER_PER_MIN", 60),
+		ChatPerMin:   getEnvInt("RATE_LIMIT_CHAT_PER_MIN", 20),
+		WindowSec:    getEnvInt("RATE_LIMIT_WINDOW_SEC", 60),
+		KeyTTL:       getEnvInt("RATE_LIMIT_KEY_TTL_SEC", 120), // 窗口的 2 倍，用于自动清理
+	}
+
+	// 配额：新租户默认每月 token 配额（0 = 不限制）
+	cfg.Quota = QuotaConfig{
+		DefaultMonthlyToken: getEnvInt64("QUOTA_DEFAULT_MONTHLY_TOKEN", 1000000),
+	}
+
+	// 用量统计：Redis key 保留天数（只保留最近 N 天，自动过期清理）
+	cfg.Usage = UsageConfig{
+		RedisTTL: getEnvInt("USAGE_REDIS_TTL_DAYS", 30),
 	}
 
 	// 3. 赋值给全局变量

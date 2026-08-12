@@ -81,7 +81,15 @@ func main() {
 
 	// 7. 组装 ReAct 引擎：LLM 客户端(适配) → 引擎(绑定已注册工具/工具权限校验/内置记忆)
 	{
-		llmCli := llmclient.NewClient(cfg.LLM)     // 真实 LLM 客户端（DeepSeek/硅基流动）
+		llmCli := llmclient.NewClient(cfg.LLM) // 真实 LLM 客户端（DeepSeek/硅基流动）
+
+		// 注入用量统计钩子：每次 LLM 调用完成后累加 Redis 用量（租户/用户维度，按天）。
+		// 引擎在调用 LLM 时已把 tenant_id/user_id 放进 ctx（见 engine.Run 的 WithTenantUser），
+		// 用量上报实现从 ctx 提取后累加 —— 业务调用链零侵入。
+		if oc, ok := llmCli.(*llmclient.OpenAIClient); ok {
+			oc.SetUsageReporter(service.NewUsageReporter())
+		}
+
 		llmAdapter := engine.NewLLMAdapter(llmCli) // 适配成 engine.LLMClient 最小接口
 
 		// 底层：Redis 会话记忆（持久化，重启不丢）

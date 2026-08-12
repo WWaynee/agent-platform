@@ -371,12 +371,33 @@
 
 #### 周三・限流 & 用量统计
 
-- [ ] Redis 实现租户维度 QPS 限流
-- [ ] LLM 调用 Token 消耗统计
-- [ ] 租户配额检查
-- [ ] 超配额拦截
-- [ ] 测试：高频请求触发限流
-- [ ] 测试：每次 LLM 调用计数器递增
+- [x] Redis 分布式滑动窗口限流（ZSet + Lua 原子操作）
+- [x] 租户级 + 用户级两层限流中间件（覆盖所有私有接口）
+- [x] 对话接口专属更严格限流（调 LLM 成本高，单独计数）
+- [x] LLM 调用 Token 消耗实时统计（复用 UsageReporter 钩子，按天 + 租户/用户维度）
+- [x] 租户配额检查（QuotaLlmToken 字段，0 = 不限制）
+- [x] 超配额拦截（对话接口返回 403 提示配额已用完）
+- [x] 用量查询接口（当天用量 + 最近 N 天历史）
+- [x] 新租户默认 token 配额（默认 100 万/月）
+- [x] 测试：高频请求触发限流返回 429
+- [x] 测试：每次 LLM 调用 Redis 计数器递增
+
+#### 📌 周三遇到的问题与解决方案
+
+1. **用量统计怎么把 tenant_id 传到 LLM 客户端**：一开始纠结是改 LLM 调用签名（显式传参）还是走 context 透传。显式传参要改业务调用链，侵入大。
+   → 决定**复用已有 UsageReporter 钩子 + context 透传**（方案 B/README 预留位）：新增 `agent/interfaces/context.go` 定义 `WithTenantUser(ctx, tenantID, userID)` 和 `TenantIDFromCtx/UserIDFromCtx` 安全取读函数；`engine.Run` 每次调 LLM 前把租户/用户塞进 ctx，`api/service` 的 `UsageReporter.Report` 从 ctx 提取后 Redis 累加 —— **业务调用链（agent/service）零侵入**。
+
+2. **限流必须分布式 + 原子，否则多实例不准**：本地内存计数在多副本部署时各自独立，阈值整体失效且不公平；并发请求还有竞态。
+   → **用 Redis ZSet 实现滑动窗口**，**Lua 脚本保证原子性**（删旧 + 计数 + 写入 + 设过期一条龙）。成员值用"时间戳+随机数"唯一化，避免同一毫秒并发成员重复导致计数少算。Redis 故障时**保守放行**（限流组件挂了不把服务弄挂，但打印告警），一切可控。
+
+3. **限流维度拆分（三层）**：单层限流防不了「单个租户整体打爆」和「单个用户恶意刷」两类问题。
+   → 做成**租户级（默认 300/分）+ 用户级（默认 60/分）两层**叠加；**对话接口单独再限**（默认 20/分，因为调 LLM 成本高）。所有阈值都放 `config`，不写死。
+
+4. **用量按天 + 多维度 key 设计**：每天调用次数多，写 MySQL 慢；还要能按天出趋势。
+   → **只做 Redis 实时按天计数，不做 MySQL 持久化**（按你定的简化方案）：key 形如 `usage:tenant:{id}:{YYYY-MM-DD}:token/calls`、`usage:user:{id}:{date}:token/calls`，`INCR/INCRBY` 原子累加，设置 **30 天过期**自动清理，无需定时任务。查询接口直接从 Redis 读，支持最近 N 天历史。
+
+5. **配额拦截要「只对打 LLM 的接口」生效**：上传文档、查列表等普通接口不合配额语义，对话才耗 token。
+   → **配额中间件只挂在 `POST /api/chat`**（且放在限流中间件之后执行：限流→配额→业务）。读租户表 `QuotaLlmToken`（0=不限制），从 Redis 按月求和当月已用 token，超了返回 403"本月 token 配额已用完"。
 
 #### 周四・可观测体系
 
@@ -486,7 +507,7 @@ agent-platform/
 │
 ├── api/                       # HTTP 接口层（Gin）
 │   ├── router.go              #   路由注册：公开组 / 私有组（JWT 鉴权）/ 管理组 admin（JWT+AdminAuth）
-│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go / session.go / task.go / tool_admin.go
+│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go / session.go / task.go / tool_admin.go / usage.go
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
@@ -495,8 +516,10 @@ agent-platform/
 │   │   ├── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
 │   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单：显式关闭即拒，查不到默认放行）
 │   │   ├── tool_admin.go      #   工具开关配置（租户管理）：GetToolEnabled / UpdateToolEnabled（查不到默认启用）
-│   │   └── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
-│   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / admin / context
+│   │   ├── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
+│   │   ├── usage.go           #   Token 用量统计业务：实现 llmclient.UsageReporter 钩子（从 ctx 取租户/用户→Redis 累加）+ 当天/历史查询
+│   │   └── quota.go           #   租户 Token 配额校验：CheckTenantTokenQuota（读 QuotaLlmToken + 当月 Redis 用量对比）
+│   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / admin / context / ratelimit(限流) / quota(配额)
 │   ├── response/              #   统一返回格式与错误码工具
 │   ├── validator/             #   统一参数校验（go-playground/validator v10）：BindJSON 绑定+校验
 │   │                          #   + HandleBindError 统一出口（校验失败返回 400 + 结构化字段错误 data）
@@ -512,12 +535,14 @@ agent-platform/
 │   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）
 │   ├── session.go             #   会话 CRUD：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,更新时间倒序) / DeleteSession(软删)
 │   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / UpdateTaskRetry / GetTaskByID / ListTasks(分页)
-│   └── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / ListToolConfigs / UpdateToolConfig / InitDefaultToolConfigs）
+│   ├── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / ListToolConfigs / UpdateToolConfig / InitDefaultToolConfigs）
+│   └── ratelimit.go / usage.go#   Redis 限流与用量统计存储：AllowRequest(滑动窗口 Lua) + AddUsage/GetDayUsage/GetMonthUsage/GetRangeUsage
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
 │   └── splitter.go
 │
 ├── llmclient/                 # 大模型客户端（OpenAI 兼容接口）
+│   ├── usage.go               #   Token 用量封装：UsageReporter 回调钩子接口 + UsageEvent(含 ctx) + 内置累计统计
 │   ├── types.go               #   统一数据结构：Chat/Embedding(含Batch)/响应、角色、token 用量
 │   └── client.go              #   Client 接口 + OpenAIClient 实现：超时/退避重试/多厂商/熔断/
 │                               #   ChatWithJSON 结构化输出；Embed / EmbedBatch 向量生成
@@ -531,6 +556,7 @@ agent-platform/
 │
 ├── agent/                       # 自研 Agent 引擎（ReAct 骨架，周五起）
 │   ├── interfaces/interfaces.go #   AgentContext（多租户/会话上下文，下沉避免循环依赖）
+│   │   └── context.go           #   跨层透传租户/用户标识：WithTenantUser + TenantIDFromCtx/UserIDFromCtx（供用量统计/配额）
 │   ├── engine/                  #   ReAct 引擎（调度核心）
 │   │   │                       #     engine.go: 主循环 Run(拿历史→拼Prompt→调LLM→解析→执行工具→持久化)
 │   │   │                       #     prompt.go: 动态拼装 SystemPrompt(角色+工具列表+JSON格式)

@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"agent-platform/config"
 	"agent-platform/storage"
 	"agent-platform/storage/model"
 )
@@ -34,6 +35,8 @@ func CreateTenant(name, adminUsername, adminPassword string) (*model.Tenant, err
 	tenant := &model.Tenant{
 		Name:   name,
 		Status: 1, // 默认启用
+		// 新租户默认 token 配额（来自配置；0 表示不限制）
+		QuotaLlmToken: config.GlobalConfig.Quota.DefaultMonthlyToken,
 	}
 	if err := storage.CreateTenant(tenant); err != nil {
 		return nil, fmt.Errorf("创建租户失败: %w", err)

@@ -37,6 +37,8 @@ func NewRouter() *gin.Engine {
 	// 私有路由组（挂 JWT 鉴权中间件，必须带有效 token 才能访问）
 	private := r.Group("/api")
 	private.Use(middleware.JWTAuth())
+	// 全局限流：所有私有接口都过租户级 + 用户级滑动窗口（分布式限流）
+	private.Use(middleware.RateLimiter())
 	{
 		// 测试接口：从 Context 拿当前登录用户信息
 		private.GET("/user/info", handler.GetUserInfo)
@@ -59,7 +61,10 @@ func NewRouter() *gin.Engine {
 		private.POST("/knowledge/search", handler.KnowledgeSearch)
 
 		// Agent 对话（ReAct 引擎，需登录，tenant_id 从 JWT 上下文拿）
-		private.POST("/chat", handler.Chat)
+		// 对话接口叠加两层更严格的保护（调 LLM 成本高）：
+		//   - ChatRateLimiter：对话专属限流（阈值更低，单独计数，见配置 RATE_LIMIT_CHAT_PER_MIN）
+		//   - QuotaInterceptor：租户 token 配额拦截（超过 QuotaLlmToken 就拦截）
+		private.POST("/chat", middleware.ChatRateLimiter(), middleware.QuotaInterceptor(), handler.Chat)
 
 		// 会话管理（创建/列表/删除，需登录）
 		private.POST("/session", handler.CreateSession)       // 创建会话
@@ -82,7 +87,11 @@ func NewRouter() *gin.Engine {
 			// 租户状态管理（启/停租户，仅管理员）
 			admin.PUT("/tenant/:id/status", handler.UpdateTenantStatus) // 更新租户状态（0 禁用 / 1 启用）
 
-			// 用户管理、用量统计：后续阶段补充（统一放本组即自动受管理员中间件保护）
+			// 用量统计查询（租户管理员看本租户的 token 消耗，体现计费能力）
+			admin.GET("/usage/today", handler.GetUsageToday)     // 当天用量（token + 调用次数）
+			admin.GET("/usage/history", handler.GetUsageHistory) // 最近 N 天用量趋势（?days=N，默认 7，上限 30）
+
+			// 用户管理：后续阶段补充（统一放本组即自动受管理员中间件保护）
 		}
 	}
 
