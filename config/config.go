@@ -85,6 +85,14 @@ type ServerConfig struct {
 	HTTPPort int // HTTP 监听端口
 }
 
+// LogConfig 日志配置
+type LogConfig struct {
+	// Level 日志级别：debug（开发，最详细）/ info（生产，默认）。生产环境用 info，开发用 debug。
+	Level string
+	// File 日志文件路径。为空则只输出到 stdout；设置后同时写文件（便于落盘归档 / 采集）
+	File string
+}
+
 // RateLimitConfig 限流配置（滑动窗口，Redis 分布式实现）
 type RateLimitConfig struct {
 	TenantPerMin int // 每个租户每分钟最大请求数（所有私有接口合计），默认 300
@@ -120,6 +128,7 @@ type Config struct {
 	RateLimit RateLimitConfig
 	Quota     QuotaConfig
 	Usage     UsageConfig
+	Log       LogConfig
 }
 
 // GlobalConfig 全局配置实例，程序启动时加载一次
@@ -218,6 +227,12 @@ func Load() error {
 	// 用量统计：Redis key 保留天数（只保留最近 N 天，自动过期清理）
 	cfg.Usage = UsageConfig{
 		RedisTTL: getEnvInt("USAGE_REDIS_TTL_DAYS", 30),
+	}
+
+	// 日志：级别默认 info（生产），开发环境可设 LOG_LEVEL=debug 看最全
+	cfg.Log = LogConfig{
+		Level: getEnv("LOG_LEVEL", "info"),
+		File:  getEnv("LOG_FILE", ""), // 空 = 只输出 stdout
 	}
 
 	// 3. 赋值给全局变量
