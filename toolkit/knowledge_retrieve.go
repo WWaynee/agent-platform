@@ -16,7 +16,8 @@ import (
 // 能调用本工具检索出相关文档片段作为回答依据。
 //
 // ⚠️ 多租户隔离：执行时从 AgentContext.TenantID 取当前租户，
-//    传给 service.Search 检索，隔离底线仍在 storage 层（SearchVectors 强制 tenant_id 过滤）。
+//
+//	传给 service.Search 检索，隔离底线仍在 storage 层（SearchVectors 强制 tenant_id 过滤）。
 type KnowledgeRetrieveTool struct{}
 
 // NewKnowledgeRetrieveTool 构造知识库检索工具。
@@ -68,7 +69,8 @@ func (t KnowledgeRetrieveTool) Execute(ctx interfaces.AgentContext, params strin
 	}
 
 	// 2. 以当前租户身份调用 service.Search 检索（topK 取 3）
-	hits, err := service.Search(ctx.TenantID, req.Query, 3)
+	//    用 ctx.ToContext 把 Agent 上下文里的 trace_id/tenant/user 译成标准 ctx，贯穿到检索链路。
+	hits, err := service.Search(ctx.ToContext(nil), ctx.TenantID, req.Query, 3)
 	if err != nil {
 		return "", fmt.Errorf("知识库检索失败: %w", err)
 	}

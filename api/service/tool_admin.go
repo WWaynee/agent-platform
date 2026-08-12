@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -18,10 +19,11 @@ import (
 // 二者不同包不冲突。本层负责业务口径（"查不到默认启用"等），storage 只做纯 CRUD。
 
 // GetToolEnabled 查询某租户对某工具是否启用。
+// ctx 携带请求级 trace_id/tenant_id，透传给 storage 使 DB 日志带同一链路 ID。
 // 遵循统一策略：查不到配置记录（DB 无该租户对该工具的开关记录）时，视为"默认启用"返回 true。
 // 其它数据库错误原样返回，交由上层处理。
-func GetToolEnabled(tenantID uint64, toolName string) (bool, error) {
-	cfg, err := storage.GetToolConfig(tenantID, toolName)
+func GetToolEnabled(ctx context.Context, tenantID uint64, toolName string) (bool, error) {
+	cfg, err := storage.GetToolConfig(ctx, tenantID, toolName)
 	if err == nil {
 		return cfg.IsEnable, nil
 	}
@@ -33,12 +35,13 @@ func GetToolEnabled(tenantID uint64, toolName string) (bool, error) {
 }
 
 // UpdateToolEnabled 更新某租户对某工具是否启用（upsert）。
+// ctx 携带请求级 trace_id/tenant_id，透传给 storage。
 // 校验工具名非空；存储层按 (tenant_id, tool_name) 定位，存在即更新、不存在即创建。
-func UpdateToolEnabled(tenantID uint64, toolName string, isEnable bool) error {
+func UpdateToolEnabled(ctx context.Context, tenantID uint64, toolName string, isEnable bool) error {
 	if toolName == "" {
 		return fmt.Errorf("工具名不能为空")
 	}
-	if err := storage.UpdateToolConfig(tenantID, toolName, isEnable); err != nil {
+	if err := storage.UpdateToolConfig(ctx, tenantID, toolName, isEnable); err != nil {
 		return fmt.Errorf("更新工具配置失败: %w", err)
 	}
 	return nil

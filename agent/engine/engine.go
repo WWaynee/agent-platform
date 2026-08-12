@@ -3,11 +3,12 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
 
-	"agent-platform/agent/interfaces"
 	"agent-platform/agent/memory"
 	"agent-platform/agent/toolmanager"
+	"agent-platform/observability"
+
+	"go.uber.org/zap"
 )
 
 // ============ LLM 客户端接口 ============
@@ -117,13 +118,21 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 	var lastRaw string // 记录 LLM 最后一次原始输出（兜底用）
 	parseRetry := 0    // 解析失败重试次数（最多 1 次）
 
+	// 引擎运行日志统一经 AgentContext 取 logger：自动带 trace_id / tenant_id / user_id，
+	// 使 Agent 全链路（本轮迭代/LLM/工具）与 HTTP 入口共享同一 trace_id。
+	alogger := observability.WithAgentContext(ctx)
+
 	// 3/4. ReAct 主循环
 	for iter := 0; iter < e.MaxIterations; iter++ {
-		log.Printf("[ReAct] 会话=%s 第 %d/%d 轮", ctx.SessionID, iter+1, e.MaxIterations)
+		alogger.Info("ReAct 进入本轮",
+			zap.String("session_id", ctx.SessionID),
+			zap.Int("iteration", iter+1),
+			zap.Int("max_iterations", e.MaxIterations))
 
 		// a. 调 LLM 生成下一步输出（想）
-		//    用携带租户/用户标识的 ctx 调用，让下游用量统计/配额能从 ctx 提取归属
-		llmCtx := interfaces.WithTenantUser(context.Background(), ctx.TenantID, ctx.UserID)
+		//    用携带租户/用户/trace_id 标识的 ctx 调用，让下游用量统计/配额/日志能从 ctx 提取归属。
+		//    ⚠️ 不复用 context.Background() 直接裸用——改为基于上下文构造，避免丢失 trace_id。
+		llmCtx := ctx.ToContext(nil)
 		raw, err := e.LLMClient.Chat(llmCtx, ChatRequest{Messages: msgs})
 		if err != nil {
 			// LLM 调用失败 → 降级：不 panic、不裸抛错误，改返回友好兜底回答，
@@ -134,7 +143,7 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 			return resp, nil
 		}
 		lastRaw = raw
-		log.Printf("[ReAct] LLM 输出: %.180s", raw)
+		alogger.Info("ReAct LLM 输出", zap.String("session_id", ctx.SessionID), zap.Int("iteration", iter+1))
 
 		// b/c. 解析 LLM 输出（是否 final_answer 还是工具调用）
 		parsed, perr := parseLLMOutput(raw)
@@ -162,7 +171,10 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		if terr != nil {
 			out = fmt.Sprintf("工具 %q 执行失败: %v", parsed.Action, terr)
 		}
-		log.Printf("[ReAct] 调用工具 %s 完成", parsed.Action)
+		alogger.Info("ReAct 工具调用完成",
+			zap.String("session_id", ctx.SessionID),
+			zap.String("tool_name", parsed.Action),
+			zap.Bool("ok", terr == nil))
 
 		// h. 把"这次的决策 + 观察结果"追加进上下文，供下一轮继续思考
 		// 注意：观察结果用 user 角色而非 tool 角色喂回——本引擎是"文本JSON" ReAct 约定，

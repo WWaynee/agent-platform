@@ -1,10 +1,6 @@
-// Package interfaces 存放跨 Agent 各子包共享的公共类型。
-//
-// 为什么单独一个包：
-//   避免 engine ↔ toolmanager 之间出现循环依赖（toolmanager 的工具需要
-//   知道"执行上下文"，而 engine 又持有 toolmanager；把共享的 AgentContext
-//   下沉到独立包后，两个子包都只依赖它，依赖方向变成单向、无环）。
 package interfaces
+
+import "context"
 
 // AgentContext 是一次请求执行过程中贯穿各层（引擎/工具/记忆）的上下文。
 // 它携带这次执行所必须的多租户与会话定位信息，并可用作通用透传容器。
@@ -20,6 +16,43 @@ type AgentContext struct {
 
 	// meta 通用透传容器：存放其他需要沿调用链下传的信息（如 TraceID、超时、配额等）。
 	meta map[string]any
+}
+
+// 元信息中 trace_id 使用的规范 key（与 context.go 的 ctxKeyTraceID 对应，经 ToContext 写入 ctx）。
+const metaKeyTraceID = "__trace_id__"
+
+// WithTraceID 把链路 ID 记入 AgentContext 的透传元信息，返回同实例（链式可用）。
+// HTTP 入口（handler.Chat）可在构造 AgentContext 后调用它，把请求级 trace_id 带入
+// Agent 内部；随后 ToContext / observability.WithAgentContext 把它写进标准 ctx 供日志携带。
+func (c *AgentContext) WithTraceID(traceID string) *AgentContext {
+	return c.WithMeta(metaKeyTraceID, traceID)
+}
+
+// TraceID 读取 AgentContext 中记录的链路 ID；未设置时返回空字符串。
+func (c *AgentContext) TraceID() string {
+	if c == nil {
+		return ""
+	}
+	if v, ok := c.GetMeta(metaKeyTraceID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ToContext 把 AgentContext 中的租户 / 用户 / trace_id 合并进一个标准 context.Context。
+//
+// 用途：Agent 内部在调用 LLM / 存储等"以标准 ctx 贯穿"的下游时，把 AgentContext 承载的
+// 链路信息翻译成 context 值，使 trace_id / tenant_id / user_id 能经 observability.WithContext
+// 自动进入日志。避免"新建 context 把 trace_id 弄丢"。
+func (c *AgentContext) ToContext(base context.Context) context.Context {
+	if base == nil {
+		base = context.Background()
+	}
+	ctx := WithTenantUser(base, c.TenantID, c.UserID)
+	if tid := c.TraceID(); tid != "" {
+		ctx = WithTraceID(ctx, tid)
+	}
+	return ctx
 }
 
 // WithMeta 存入一条透传元信息。

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 
 	"gorm.io/gorm"
@@ -11,6 +12,7 @@ import (
 // ============ Storage 层：租户工具权限配置 ============
 //
 // 只跟 tenant_tool_config 表打交道，纯 CRUD。
+// 每个方法都接收 ctx：把请求级 trace_id/tenant_id 透传给 GORM（DB.WithContext(ctx)）。
 // 供上层（ToolManager 的 PermissionChecker）判断"某租户是否开启某工具"。
 //
 // "查不到配置默认启用"采用双保险，兼顾新老租户：
@@ -33,9 +35,9 @@ var DefaultTools = []string{
 // GetToolConfig 查询某租户对某工具"是否开启"的配置。
 // 所有查询强制 tenant_id 过滤，杜绝跨租户读取。
 // 查不到对应记录时返回 gorm.ErrRecordNotFound（上层据此按"默认开启"兜底）。
-func GetToolConfig(tenantID uint64, toolName string) (*model.TenantToolConfig, error) {
+func GetToolConfig(ctx context.Context, tenantID uint64, toolName string) (*model.TenantToolConfig, error) {
 	var cfg model.TenantToolConfig
-	err := DB.Where("tenant_id = ? AND tool_name = ?", tenantID, toolName).
+	err := DB.WithContext(ctx).Where("tenant_id = ? AND tool_name = ?", tenantID, toolName).
 		First(&cfg).Error
 	if err != nil {
 		// 返回原错误，由上层通过 errors.Is(err, gorm.ErrRecordNotFound) 判断
@@ -47,9 +49,9 @@ func GetToolConfig(tenantID uint64, toolName string) (*model.TenantToolConfig, e
 // ListToolConfigs 列出某租户的全部工具配置。
 // 强制 tenant_id 过滤，只返回当前租户的配置。
 // 未初始化的老租户返回空列表（非错误），由上层决定展示兜底。
-func ListToolConfigs(tenantID uint64) ([]model.TenantToolConfig, error) {
+func ListToolConfigs(ctx context.Context, tenantID uint64) ([]model.TenantToolConfig, error) {
 	var cfgs []model.TenantToolConfig
-	err := DB.Where("tenant_id = ?", tenantID).Order("id ASC").Find(&cfgs).Error
+	err := DB.WithContext(ctx).Where("tenant_id = ?", tenantID).Order("id ASC").Find(&cfgs).Error
 	if err != nil {
 		return nil, err
 	}
@@ -60,10 +62,10 @@ func ListToolConfigs(tenantID uint64) ([]model.TenantToolConfig, error) {
 // 采用"存在即更新、不存在即创建"的 upsert 语义（以 tenant_id+tool_name 定位），
 // 支持开启（IsEnable=true）与关闭（IsEnable=false）两种状态。
 // 所有查询/写入强制 tenant_id 过滤。
-func UpdateToolConfig(tenantID uint64, toolName string, isEnable bool) error {
+func UpdateToolConfig(ctx context.Context, tenantID uint64, toolName string, isEnable bool) error {
 	var cfg model.TenantToolConfig
 	// 尝试按 (tenant_id, tool_name) 找已有记录
-	err := DB.Where("tenant_id = ? AND tool_name = ?", tenantID, toolName).
+	err := DB.WithContext(ctx).Where("tenant_id = ? AND tool_name = ?", tenantID, toolName).
 		First(&cfg).Error
 	if err == gorm.ErrRecordNotFound {
 		// 不存在 → 创建
@@ -72,33 +74,33 @@ func UpdateToolConfig(tenantID uint64, toolName string, isEnable bool) error {
 			ToolName: toolName,
 			IsEnable: isEnable,
 		}
-		return DB.Create(&rec).Error
+		return DB.WithContext(ctx).Create(&rec).Error
 	}
 	if err != nil {
 		return err
 	}
 	// 存在 → 更新 IsEnable
-	return DB.Model(&cfg).
+	return DB.WithContext(ctx).Model(&cfg).
 		Where("id = ?", cfg.ID).
 		Update("is_enable", isEnable).Error
 }
 
 // EnableTool 便捷方法：开启某租户的某工具。
-func EnableTool(tenantID uint64, toolName string) error {
-	return UpdateToolConfig(tenantID, toolName, true)
+func EnableTool(ctx context.Context, tenantID uint64, toolName string) error {
+	return UpdateToolConfig(ctx, tenantID, toolName, true)
 }
 
 // DisableTool 便捷方法：关闭某租户的某工具。
-func DisableTool(tenantID uint64, toolName string) error {
-	return UpdateToolConfig(tenantID, toolName, false)
+func DisableTool(ctx context.Context, tenantID uint64, toolName string) error {
+	return UpdateToolConfig(ctx, tenantID, toolName, false)
 }
 
 // InitDefaultToolConfigs 新租户创建时初始化默认工具配置（默认都开启）。
 // 对 DefaultTools 中的每个工具：若该租户尚无配置则写为开启；已有则不覆盖
 // （管理员可能已自定义），保证幂等。
-func InitDefaultToolConfigs(tenantID uint64) error {
+func InitDefaultToolConfigs(ctx context.Context, tenantID uint64) error {
 	for _, name := range DefaultTools {
-		_, err := GetToolConfig(tenantID, name)
+		_, err := GetToolConfig(ctx, tenantID, name)
 		if err == nil {
 			// 已有配置（可能被自定义），跳过，不覆盖
 			continue
@@ -108,7 +110,7 @@ func InitDefaultToolConfigs(tenantID uint64) error {
 			return err
 		}
 		// 查不到 → 默认开启（UpdateToolConfig 会作为创建处理）
-		if err := UpdateToolConfig(tenantID, name, true); err != nil {
+		if err := UpdateToolConfig(ctx, tenantID, name, true); err != nil {
 			return err
 		}
 	}

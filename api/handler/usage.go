@@ -20,7 +20,7 @@ import (
 // 返回：{tokens, calls}
 func GetUsageToday(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
-	tokens, calls := service.GetTenantTodayUsage(tenantID)
+	tokens, calls := service.GetTenantTodayUsage(c.Request.Context(), tenantID)
 	response.Success(c, gin.H{
 		"tokens": tokens,
 		"calls":  calls,
@@ -44,7 +44,7 @@ func GetUsageHistory(c *gin.Context) {
 		days = 30
 	}
 
-	list, err := service.GetTenantUsageHistory(tenantID, days)
+	list, err := service.GetTenantUsageHistory(c.Request.Context(), tenantID, days)
 	if err != nil {
 		response.ServerError(c, "查询用量历史失败: "+err.Error())
 		return

@@ -50,7 +50,7 @@ func GetToolConfigList(c *gin.Context) {
 	tools := toolMgr.ListTools()
 	list := make([]gin.H, 0, len(tools))
 	for _, t := range tools {
-		enabled, err := service.GetToolEnabled(tenantID, t.Name())
+		enabled, err := service.GetToolEnabled(c.Request.Context(), tenantID, t.Name())
 		if err != nil {
 			response.ServerError(c, "查询工具配置失败: "+err.Error())
 			return
@@ -92,7 +92,7 @@ func UpdateToolConfig(c *gin.Context) {
 	}
 
 	tenantID := middleware.GetTenantID(c)
-	if err := service.UpdateToolEnabled(tenantID, toolName, req.IsEnable); err != nil {
+	if err := service.UpdateToolEnabled(c.Request.Context(), tenantID, toolName, req.IsEnable); err != nil {
 		response.ServerError(c, err.Error())
 		return
 	}

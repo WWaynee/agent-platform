@@ -5,6 +5,7 @@ import (
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	gormLogger "gorm.io/gorm/logger"
 
 	"agent-platform/config"
 )
@@ -26,8 +27,10 @@ func InitMySQL() error {
 		cfg.DBName,
 	)
 
-	// 用 GORM 连接数据库
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	// 用 GORM 连接数据库；注入自定义 logger：
+	// GORM 语句级别（含自动迁移/查询）执行后经 Trace 回调，实现 DB 慢查询与错误日志落到 observability。
+	obsLog := &obsDBLogger{logLevel: gormLogger.Warn}
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: obsLog})
 	if err != nil {
 		return fmt.Errorf("MySQL 连接失败: %w", err)
 	}

@@ -50,7 +50,7 @@ func CreateSession(c *gin.Context) {
 		title = "新会话"
 	}
 
-	id, err := service.CreateSession(tenantID, userID, title)
+	id, err := service.CreateSession(c.Request.Context(), tenantID, userID, title)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
@@ -81,7 +81,7 @@ func GetSessionList(c *gin.Context) {
 		return
 	}
 
-	list, total, err := service.GetSessionList(tenantID, userID, req.Page, req.PageSize)
+	list, total, err := service.GetSessionList(c.Request.Context(), tenantID, userID, req.Page, req.PageSize)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
@@ -108,7 +108,7 @@ func DeleteSession(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 	userID := middleware.GetUserID(c)
 
-	if err := service.DeleteSession(tenantID, userID, id); err != nil {
+	if err := service.DeleteSession(c.Request.Context(), tenantID, userID, id); err != nil {
 		// 会话不存在 / 跨租户 / 无权删除他人会话，统一返回 400
 		response.BadRequest(c, err.Error())
 		return

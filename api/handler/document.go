@@ -67,7 +67,8 @@ func UploadDocument(c *gin.Context) {
 	defer file.Close()
 
 	// 6. 调用业务层上传（异步：写文档表+任务表+投递 MQ 后立即返回）
-	doc, taskID, err := service.UploadDocument(tenantID, userID, fileHeader.Filename, fileHeader.Size, file)
+	//    透传请求级 ctx：QAR 生产者据此把当前请求的 trace_id 写进 MQ 消息体，实现生产/消费同链路。
+	doc, taskID, err := service.UploadDocument(c.Request.Context(), tenantID, userID, fileHeader.Filename, fileHeader.Size, file)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
@@ -104,7 +105,7 @@ func ListDocuments(c *gin.Context) {
 		return
 	}
 
-	list, total, err := service.ListDocuments(tenantID, req.Page, req.PageSize)
+	list, total, err := service.ListDocuments(c.Request.Context(), tenantID, req.Page, req.PageSize)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
@@ -129,7 +130,7 @@ func GetDocumentDetail(c *gin.Context) {
 	}
 
 	tenantID := middleware.GetTenantID(c)
-	doc, err := service.GetDocumentDetail(tenantID, id)
+	doc, err := service.GetDocumentDetail(c.Request.Context(), tenantID, id)
 	if err != nil {
 		// 文档不存在/跨租户访问，统一返回 400（带出错提示）
 		response.BadRequest(c, err.Error())
@@ -150,7 +151,7 @@ func DeleteDocument(c *gin.Context) {
 	}
 
 	tenantID := middleware.GetTenantID(c)
-	if err := service.DeleteDocument(tenantID, id); err != nil {
+	if err := service.DeleteDocument(c.Request.Context(), tenantID, id); err != nil {
 		// 文档不存在/跨租户访问统一返回 400
 		response.BadRequest(c, err.Error())
 		return
@@ -180,7 +181,7 @@ func ProcessDocument(c *gin.Context) {
 		return
 	}
 
-	if err := service.ProcessDocument(tenantID, id); err != nil {
+	if err := service.ProcessDocument(c.Request.Context(), tenantID, id); err != nil {
 		// 文档不存在/跨租户访问：属于"资源不存在"，返回 400 而非 500
 		if errors.Is(err, service.ErrDocumentNotFound) {
 			response.BadRequest(c, err.Error())

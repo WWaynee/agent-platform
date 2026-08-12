@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"agent-platform/agent/engine"
+	"agent-platform/agent/interfaces"
 	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 	"agent-platform/api/service"
@@ -78,7 +79,8 @@ func Chat(c *gin.Context) {
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
 		// 4.1 未传 session_id → 自动创建一条新会话（标题取首个问题）
-		id, err := service.CreateSession(tenantID, userID, defaultSessionTitle(req.Query))
+		//    透传请求级 ctx，使会话建库日志与本次请求共享同一 trace_id。
+		id, err := service.CreateSession(c.Request.Context(), tenantID, userID, defaultSessionTitle(req.Query))
 		if err != nil {
 			response.ServerError(c, "创建会话失败: "+err.Error())
 			return
@@ -91,7 +93,7 @@ func Chat(c *gin.Context) {
 			response.BadRequest(c, "无效的会话 ID")
 			return
 		}
-		s, err := service.GetSessionDetail(tenantID, id)
+		s, err := service.GetSessionDetail(c.Request.Context(), tenantID, id)
 		if err != nil {
 			// 会话不存在或属于别的租户：统一返回"不存在/无权访问"，不区分，防横向探测
 			response.Forbidden(c, "会话不存在或无权访问")
@@ -105,10 +107,15 @@ func Chat(c *gin.Context) {
 	}
 
 	// 5. 构造 Agent 上下文并运行 ReAct 引擎（历史从 Redis 按 tenant+session 读）
+	//    把请求级 trace_id 注入 AgentContext，经 ToContext/WithAgentContext 带进
+	//    Agent 全链路（ReAct 迭代 / LLM / 工具）日志，使入口→LLM 共享同一 trace_id。
 	actx := engine.AgentContext{
 		TenantID:  tenantID,
 		UserID:    userID,
 		SessionID: sessionID,
+	}
+	if tid := interfaces.TraceIDFromCtx(c.Request.Context()); tid != "" {
+		actx = *actx.WithTraceID(tid)
 	}
 	resp, err := agentEngine.Run(actx, req.Query)
 	if err != nil {

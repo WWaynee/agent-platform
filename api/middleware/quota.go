@@ -29,7 +29,8 @@ func QuotaInterceptor() gin.HandlerFunc {
 			return
 		}
 
-		over, quota := service.CheckTenantTokenQuota(tenantID)
+		// 透传请求级 ctx：配额查询/用量统计的 DB+Redis 日志带同一链路 ID。
+		over, quota := service.CheckTenantTokenQuota(c.Request.Context(), tenantID)
 		if over {
 			// 超配额：返回固定 HTTP 状态码 + 明确提示，中断请求
 			c.JSON(403, response.Body{

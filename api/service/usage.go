@@ -67,15 +67,17 @@ type DayUsage struct {
 }
 
 // GetTenantTodayUsage 查询某租户当天用量。返回 token 总数与调用次数。
-func GetTenantTodayUsage(tenantID uint64) (tokens, calls int64) {
-	t, c := storage.GetDayUsage(context.Background(), storage.DimTenant, tenantID, storage.UsageDate())
+// ctx 携带请求级 trace_id/tenant_id，透传给 storage 使 Redis 用量统计日志带同一链路 ID。
+func GetTenantTodayUsage(ctx context.Context, tenantID uint64) (tokens, calls int64) {
+	t, c := storage.GetDayUsage(ctx, storage.DimTenant, tenantID, storage.UsageDate())
 	return t, c
 }
 
 // GetTenantUsageHistory 查询某租户最近 days 天的用量趋势（含当天）。
+// ctx 携带请求级 trace_id/tenant_id，透传给 storage。
 // 仅返回确有记录的日子；按时间正序调用方展示。
-func GetTenantUsageHistory(tenantID uint64, days int) ([]DayUsage, error) {
-	m := storage.GetRangeUsage(context.Background(), storage.DimTenant, tenantID, days)
+func GetTenantUsageHistory(ctx context.Context, tenantID uint64, days int) ([]DayUsage, error) {
+	m := storage.GetRangeUsage(ctx, storage.DimTenant, tenantID, days)
 	if m == nil {
 		return []DayUsage{}, nil
 	}

@@ -17,10 +17,11 @@ import (
 // QuotaLlmToken 为新增租户时写入默认值（见 CreateTenant 改进，新租户默认 100 万）。
 
 // CheckTenantTokenQuota 校验某租户是否已超 token 配额。
+// ctx 携带请求级 trace_id/tenant_id，透传给 storage，使配额查询/用量统计日志带同一链路 ID。
 // 返回 (是否已超配额, 该租户配额值)。配额为 0 表示不限制，永不超。
-func CheckTenantTokenQuota(tenantID uint64) (over bool, quota int64) {
+func CheckTenantTokenQuota(ctx context.Context, tenantID uint64) (over bool, quota int64) {
 	// 1. 查租户配额
-	tenant, err := storage.GetTenantByID(tenantID)
+	tenant, err := storage.GetTenantByID(ctx, tenantID)
 	if err != nil {
 		// 租户查不到/DB 异常：保守不拦截（放行），避免因配额组件故障影响业务
 		return false, 0
@@ -32,7 +33,7 @@ func CheckTenantTokenQuota(tenantID uint64) (over bool, quota int64) {
 	}
 
 	// 2. 读当月已用 token（租户维度）
-	used := storage.GetMonthUsage(context.Background(), storage.DimTenant, tenantID)
+	used := storage.GetMonthUsage(ctx, storage.DimTenant, tenantID)
 	if used >= quota {
 		return true, quota
 	}

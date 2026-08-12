@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+
 	"agent-platform/storage/model"
 )
 
@@ -8,18 +10,19 @@ import (
 //
 // 只跟数据库打交道，纯 CRUD，不写业务逻辑、不做业务判断。
 // 复用全局连接 DB（在 storage/mysql.go 中定义）。
+// 每个方法都接收 ctx：把请求级 trace_id/tenant_id 透传给 GORM（DB.WithContext(ctx)）。
 // 换数据库时只需改这一层，业务层不受影响。
 
 // CreateTenant 插入一条租户记录
-func CreateTenant(tenant *model.Tenant) error {
-	return DB.Create(tenant).Error
+func CreateTenant(ctx context.Context, tenant *model.Tenant) error {
+	return DB.WithContext(ctx).Create(tenant).Error
 }
 
 // GetTenantByID 根据主键 ID 查询单个租户
 // 返回 nil（记录不存在）时，err 为 gorm.ErrRecordNotFound
-func GetTenantByID(id uint64) (*model.Tenant, error) {
+func GetTenantByID(ctx context.Context, id uint64) (*model.Tenant, error) {
 	var tenant model.Tenant
-	err := DB.Where("id = ?", id).First(&tenant).Error
+	err := DB.WithContext(ctx).Where("id = ?", id).First(&tenant).Error
 	if err != nil {
 		return nil, err
 	}
@@ -28,7 +31,7 @@ func GetTenantByID(id uint64) (*model.Tenant, error) {
 
 // ListTenants 分页查询租户列表
 // 返回该页的数据切片、符合条件的总条数，以及可能的错误
-func ListTenants(page, pageSize int) ([]model.Tenant, int64, error) {
+func ListTenants(ctx context.Context, page, pageSize int) ([]model.Tenant, int64, error) {
 	var list []model.Tenant
 	var total int64
 
@@ -41,13 +44,13 @@ func ListTenants(page, pageSize int) ([]model.Tenant, int64, error) {
 	}
 
 	// 先统计总条数
-	if err := DB.Model(&model.Tenant{}).Count(&total).Error; err != nil {
+	if err := DB.WithContext(ctx).Model(&model.Tenant{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
 	// 再查当前页数据
 	offset := (page - 1) * pageSize
-	if err := DB.Model(&model.Tenant{}).
+	if err := DB.WithContext(ctx).Model(&model.Tenant{}).
 		Offset(offset).
 		Limit(pageSize).
 		Find(&list).Error; err != nil {
@@ -59,8 +62,8 @@ func ListTenants(page, pageSize int) ([]model.Tenant, int64, error) {
 
 // UpdateTenantStatus 更新租户状态（0 禁用 / 1 启用）
 // 使用 Updates + map 方式，确保 status 为零值（0）时也能正确更新
-func UpdateTenantStatus(id uint64, status int8) error {
-	return DB.Model(&model.Tenant{}).
+func UpdateTenantStatus(ctx context.Context, id uint64, status int8) error {
+	return DB.WithContext(ctx).Model(&model.Tenant{}).
 		Where("id = ?", id).
 		Updates(map[string]interface{}{"status": status}).Error
 }

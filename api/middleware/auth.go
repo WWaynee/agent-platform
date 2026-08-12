@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"agent-platform/agent/interfaces"
 	"agent-platform/api/response"
 	"agent-platform/util"
 )
@@ -43,6 +44,10 @@ func JWTAuth() gin.HandlerFunc {
 		c.Set("user_id", claims.UserID)
 		c.Set("tenant_id", claims.TenantID)
 		c.Set("role", claims.Role)
+
+		// 同时把 tenant_id / user_id 种进请求级标准 context，
+		// 供 observability.WithContext 读取，实现日志自动带租户/用户身份
+		c.Request = c.Request.WithContext(interfaces.WithTenantUser(c.Request.Context(), claims.TenantID, claims.UserID))
 
 		// 5. 放行，继续执行后续 handler
 		c.Next()

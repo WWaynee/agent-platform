@@ -42,7 +42,7 @@ func CreateTenant(c *gin.Context) {
 		return
 	}
 
-	tenant, err := service.CreateTenant(req.Name, req.AdminUsername, req.AdminPassword)
+	tenant, err := service.CreateTenant(c.Request.Context(), req.Name, req.AdminUsername, req.AdminPassword)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
@@ -59,7 +59,7 @@ func GetTenantDetail(c *gin.Context) {
 		return
 	}
 
-	tenant, err := service.GetTenantDetail(id)
+	tenant, err := service.GetTenantDetail(c.Request.Context(), id)
 	if err != nil {
 		// 记录不存在时返回 400 或 404 语义，这里统一用 Fail(400) 便于前端处理
 		response.BadRequest(c, err.Error())
@@ -77,7 +77,7 @@ func ListTenants(c *gin.Context) {
 		return
 	}
 
-	list, total, err := service.ListTenants(req.Page, req.PageSize)
+	list, total, err := service.ListTenants(c.Request.Context(), req.Page, req.PageSize)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
@@ -105,7 +105,7 @@ func UpdateTenantStatus(c *gin.Context) {
 		return
 	}
 
-	if err := service.UpdateTenantStatus(id, req.Status); err != nil {
+	if err := service.UpdateTenantStatus(c.Request.Context(), id, req.Status); err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}

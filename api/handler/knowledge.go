@@ -43,8 +43,8 @@ func KnowledgeSearch(c *gin.Context) {
 		return
 	}
 
-	// 3. 调用检索 service
-	hits, err := service.Search(tenantID, req.Query, req.TopK)
+	// 3. 调用检索 service（透传请求级 ctx，使向量化/检索日志带同一 trace_id）
+	hits, err := service.Search(c.Request.Context(), tenantID, req.Query, req.TopK)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return

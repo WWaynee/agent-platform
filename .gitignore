@@ -20,6 +20,9 @@ logs/
 *.swo
 .DS_Store
 
+# 本地 AI 助手工具配置
+.continue/
+
 # Docker 本地持久化数据（容器挂载目录，不要提交）
 data/
 

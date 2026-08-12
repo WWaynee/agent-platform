@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"agent-platform/config"
+	"agent-platform/observability"
+
+	"go.uber.org/zap"
 )
 
 // ============ 面向接口设计 ============
@@ -118,13 +121,32 @@ func (c *OpenAIClient) GetUsageStats() (calls int, prompt, completion, total int
 	return c.usageStats.Snapshot()
 }
 
-// reportUsage 在每次调用完成后触发：① 累加进内置统计；② 报告给回调钩子。
+// reportUsage 在每次调用完成后触发：① 累加进内置统计；② 报告给回调钩子；③ 打 LLM 调用日志。
 // ctx 用发起本次调用的上下文，使上层能通过 WithValue 读取租户等标识。
 func (c *OpenAIClient) reportUsage(ctx context.Context, ev UsageEvent) {
 	// 无论成功失败都累加计数（失败无 token 消耗，总量不会虚增）
 	c.usageStats.add(ev.Operation, ev.Tokens)
 
-	// 回调钩子（可空）；取引用时加锁，避免与 SetUsageReporter 并发覆盖
+	// ① LLM 调用日志（关键链路）：记录 model / 时长 / token 用量 / 是否成功 / 错误信息。
+	//    经 WithContext 自动带上 trace_id / tenant_id（若 ctx 携带）。
+	logger := observability.WithContext(ctx)
+	fields := []zap.Field{
+		zap.String("model", ev.Model),
+		zap.Int64(observability.FieldLatency, ev.Duration.Milliseconds()),
+		zap.Int("prompt_tokens", ev.Tokens.PromptTokens),
+		zap.Int("completion_tokens", ev.Tokens.CompletionTokens),
+		zap.Int("total_tokens", ev.Tokens.TotalTokens),
+		zap.Bool("ok", ev.Success),
+	}
+	if ev.Success {
+		logger.Info("LLM 调用成功", fields...)
+	} else {
+		logger.Warn("LLM 调用失败",
+			append(fields, zap.Error(ev.Error))...,
+		)
+	}
+
+	// ② 回调钩子（可空）；取引用时加锁，避免与 SetUsageReporter 并发覆盖
 	c.usageMu.Lock()
 	rep := c.usageReporter
 	c.usageMu.Unlock()

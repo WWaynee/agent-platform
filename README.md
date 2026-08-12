@@ -401,14 +401,28 @@
 
 #### 周四・可观测体系
 
-- [ ] 全链路 TraceID 生成与透传
-- [ ] 结构化日志封装
-- [ ] 日志携带 TraceID
+- [x] 全链路 TraceID 生成与透传（HTTP 入口生成/透传 → Agent → LLM → 工具 → 存储全链路贯穿，MQ 生产/消费同链路）
+- [x] 结构化日志封装（observability：JSON 结构化 + 统一字段 trace_id/tenant_id/user_id/latency）
+- [x] 日志携带 TraceID（WithContext / WithAgentContext / 自定义 GORM logger 自动注入）
 - [ ] 接入 Prometheus 指标
 - [ ] 核心指标埋点：请求量、LLM 调用次数
 - [ ] 审计日志写入
-- [ ] 测试：一条请求全链路 TraceID 一致
+- [ ] 测试：一条请求全链路 TraceID 一致（详见本日"遇到的问题与解决方案"）
 - [ ] 测试：Prometheus 能采集到指标
+
+#### 📌 周四遇到的问题与解决方案
+
+1. **trace_id 如何从 HTTP 入口贯穿到 Agent / LLM / 存储**：对话链路（handler → engine → 工具 → 存储）跨多个子包，易用裸 `context.Background()` 重建上下文把 trace_id 弄丢。
+   → 建立**双向协议**（`agent/interfaces`）：标准 ctx 侧 `WithTraceID(ctx,id)`/`TraceIDFromCtx(ctx)`；`AgentContext` 侧 `WithTraceID()/TraceID()/ToContext(base)`。入口 `handler.Chat` 把请求级 trace_id 注入 `AgentContext`；engine 内取 logger 用 `observability.WithAgentContext(ctx)`、调 LLM/工具用 `ctx.ToContext(nil)`，**不再裸新建 ctx**。
+
+2. **DB 慢查询/错误日志要带 trace_id**：GORM 默认 logger 打 stdout 无链路上下文。
+   → 自定义 GORM logger（`storage/db_logger.go`）接入 `observability`，从 `DB.WithContext(ctx)` 透传的 ctx 读 trace_id/tenant_id 落统一 JSON；所有 storage CRUD 均 `DB.WithContext(ctx)`。
+
+3. **MQ 生产/消费日志串同一条 trace_id**：生产者（HTTP 请求内）有 trace_id，消费者（独立 worker）没有 HTTP 上下文。
+   → 生产方把 `TraceIDFromCtx(ctx)` 写入消息体（`DocumentParseMsg.TraceID`）；消费方取出 `msg.TraceID` 用 `WithTraceID` 重建消费 ctx，使"上传请求"与"异步消费"日志对齐，另加 `msg_id` 便于按消息追踪。
+
+4. **日志字段要统一、可被采集系统解析**：各层手写 `fmt.Printf` 字段不规范难聚合。
+   → 统一抽象到 `observability`：JSON 结构化 + 字段常量（`FieldTraceID/FieldTenantID/FieldUserID/FieldLatency/FieldError`）；`WithContext/WithTenantUser/WithAgentContext` 自动注入身份字段，`logger.Info/Error` 即带 trace_id。
 
 #### 周五・全链路联调 & 异常测试
 
@@ -449,7 +463,8 @@
 | 对象存储 | MinIO |
 | 向量库 | Qdrant |
 | 消息队列 | RabbitMQ |
-| 监控 | Prometheus |
+| 监控 | Prometheus（指标埋点待接入）|
+| 可观测 | 结构化 JSON 日志（observability，JSON 采集器可直接对接）|
 | 大模型 | DeepSeek 对话（OpenAI 兼容）；向量走硅基流动（SiliconFlow）|
 | 部署 | Docker Compose |
 
@@ -472,13 +487,23 @@ go run cmd/worker/main.go     # Worker 独立进程（消费 document_parse 队�
 
 服务启动后访问：`http://127.0.0.1:端口/health`
 
+## ⚠️ 注意事项（精要）
+
+- **启动顺序**：先 `docker compose up -d` 拉起全部中间件，再跑 `migrate` 建表，最后启 `api`（如需要异步解析再加 `worker`）。
+- **重启不丢**：会话消息 / 用量 / 限流计数在 Redis；文档与元数据在 MySQL/MinIO，内存里没有业务状态，重启安全。
+- **可观测为结构化 JSON**：日志统一走 `observability` 输出 JSON（含 `trace_id/tenant_id/user_id/latency`），可按采集器直接接入。
+- **trace_id 贯穿**：HTTP 入口生成/透传，经 Agent/LLM/工具/存储，并随 MQ 消息带到消费端；排查问题先看 trace_id。
+- **多租户隔离底线在数据层死守**：新增任何跨租户查询，一律从 ctx/JWT 取 `tenant_id`，不要信前端传入。
+- **bool 开关勿用 `gorm:"default:true"`**：零值 false 会被当"未赋值"覆盖成 true，导致"关闭"失效（详见第二周周二）。
+- **生产部署前**：务必处理下方"上线前需调整"清单（换密钥、GIN_MODE=release、接采集、限 CORS）。
+
 ## 📐 架构设计要点
 
 - **多租户隔离**：单库多表逻辑隔离，全链路 `tenant_id` 透传
 - **自研 Agent 引擎**：轻量 ReAct 调度，不依赖重型框架
 - **插件化工具**：统一工具接口，按需注册，权限可控
 - **分层记忆**：Redis 短期会话记忆 + 超长上下文自动摘要
-- **全链路可观测**：TraceID 贯穿，指标埋点完善
+- **全链路可观测**：TraceID 贯穿（HTTP→Agent→LLM→工具→存储→MQ 生产/消费），统一结构化 JSON 日志
 
 ## 📁 项目目录结构
 
@@ -519,7 +544,8 @@ agent-platform/
 │   │   ├── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
 │   │   ├── usage.go           #   Token 用量统计业务：实现 llmclient.UsageReporter 钩子（从 ctx 取租户/用户→Redis 累加）+ 当天/历史查询
 │   │   └── quota.go           #   租户 Token 配额校验：CheckTenantTokenQuota（读 QuotaLlmToken + 当月 Redis 用量对比）
-│   ├── middleware/            #   中间件：trace / recovery / logger / cors / JWT / admin / context / ratelimit(限流) / quota(配额)
+│   ├── middleware/            #   中间件：trace(生成/透传trace_id) / recovery / logger(结构化带trace) / cors
+│   │                          #   / JWT / admin / context / ratelimit(限流) / quota(配额)
 │   ├── response/              #   统一返回格式与错误码工具
 │   ├── validator/             #   统一参数校验（go-playground/validator v10）：BindJSON 绑定+校验
 │   │                          #   + HandleBindError 统一出口（校验失败返回 400 + 结构化字段错误 data）
@@ -528,6 +554,7 @@ agent-platform/
 ├── storage/                   # 数据持久化层
 │   ├── redis.go               #   Redis 客户端初始化 InitRedis（含 Ping 连通性校验 + 全局 RDB）
 │   ├── mysql.go               #   MySQL 初始化（GORM）
+│   ├── db_logger.go           #   自定义 GORM Logger：从 ctx 提 trace_id/tenant_id，慢查询/错误落统一 JSON 日志
 │   ├── minio.go               #   MinIO SDK 封装 + 初始化：Upload/Download/GetURL/Delete
 │   ├── qdrant.go              #   Qdrant 向量库封装：批量入库 UpsertVectors + 多租户检索 SearchVectors
 │   ├── model/models.go        #   GORM 模型（全核心表的实体定义）
@@ -556,7 +583,9 @@ agent-platform/
 │
 ├── agent/                       # 自研 Agent 引擎（ReAct 骨架，周五起）
 │   ├── interfaces/interfaces.go #   AgentContext（多租户/会话上下文，下沉避免循环依赖）
-│   │   └── context.go           #   跨层透传租户/用户标识：WithTenantUser + TenantIDFromCtx/UserIDFromCtx（供用量统计/配额）
+│   │   │                       #   含 trace_id 贯穿：WithTraceID()/TraceID()/ToContext(base)——把 AgentContext 承载的
+│   │   │                       #   tenant/user/trace 合并译成标准 ctx，调 LLM/存储不再丢 trace_id
+│   │   └── context.go           #   标准 ctx 透传：WithTraceID/TraceIDFromCtx + WithTenantUser/TenantIDFromCtx/UserIDFromCtx
 │   ├── engine/                  #   ReAct 引擎（调度核心）
 │   │   │                       #     engine.go: 主循环 Run(拿历史→拼Prompt→调LLM→解析→执行工具→持久化)
 │   │   │                       #     prompt.go: 动态拼装 SystemPrompt(角色+工具列表+JSON格式)
@@ -577,18 +606,21 @@ agent-platform/
 │       │                        #     redis key: session:{tenant}:{sid}:messages
 │       └── *_test.go            #   各实现对应单测
 ├── mq/                        # 消息队列封装（异步任务，第二周周一）
-│   ├── message.go             #   消息结构体 DocumentParseMsg(task_id/tenant_id/document_id) + 生产者 PublishDocumentParseTask
+│   ├── message.go             #   消息 DocumentParseMsg(task_id/tenant_id/document_id + msg_id/trace_id) + 生产者 PublishDocumentParseTask(ctx, ...)
 │   └── rabbitmq.go            #   RabbitMQ 基础客户端：InitRabbitMQ 连接+建Channel+声明队列(durable) /
-│                              #   Publish 发消息(持久化 Persistent) / Consume 消费(手动ACK)：
+│                              #   Publish 发消息(持久化 Persistent, 取 ctx 的 trace_id 写入消息体) / Consume 消费(手动ACK)：
 │                              #   - 返回 nil → Ack；包装 ErrRequeue → Nack 重入队重试；其他失败/panic → 也 Ack（防死循环）
 │                              #   - safeProcess 用 defer/recover 捕获 handler panic，单条消息异常不拖垮 worker
+│                              #   - WithTraceID 重建消费 ctx，串起"上传请求 ↔ 异步消费"同一条 trace_id
 ├── service/                   # （预留）业务服务层（与 api/service 演进，后续整合）
 │   └── .gitkeep
 ├── toolkit/                    # 可插拔工具集（Agent 调用能力注入）
 │   ├── echo_tool.go            #   Echo 测试工具（骨架链路验证）
 │   └── knowledge_retrieve.go   #   知识库检索工具（RAG 核心，调 service.Search，按 ctx.TenantID 隔离）
-├── observability/             # （预留）可观测体系（TraceID / 指标 / 审计，第二周周四）
-│   └── .gitkeep
+├── observability/             # 可观测体系（结构化 JSON 日志唯一出入口，第二周周四）
+│   ├── logger.go              #   日志封装：JSON 结构化 + 字段常量(FieldTraceID/FieldTenantID/FieldUserID/FieldLatency/FieldError)
+│   │                          #   + WithContext(ctx 自动注入 trace/tenant/user 字段) / WithAgentContext(Agent 链路) / WithTenantUser
+│   └── logger_test.go         #   单测（trace_id/tenant_id 字段注入校验）
 │
 └── data/                      # ⛔ 运行时数据，gitignore 排除不入库（本地 Docker 持久化）
     ├── mysql/                 #   MySQL 数据文件
@@ -684,9 +716,9 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
    - 后续：进一步定义细粒度错误码，如 `40001`=参数错误、`40101`=未登录、`40301`=无权限、`50001`=服务器错误，所有接口统一使用
 
 6. **请求日志中间件**
-   - 现状：**已有 `middleware.Logger`**，全局挂载，记录请求方法、路径、状态码、耗时，并带 `TraceID`
-   - 问题：目前是用 `fmt.Printf` 打 stdout，非结构化、未落盘
-   - 后续：升级为结构化日志（logrus/zap）+ 文件或采集，配合全链路 TraceID
+   - 现状：**已升级为结构化日志** ✅ — `middleware.Logger` 全局挂载，输出 JSON（方法/路径/状态码/耗时 + `fields_trace_id/tenant_id/user_id/latency`），统一走 `observability` 出口
+   - 问题：目前结构化 JSON 打到 stdout，**未接文件 / 采集后端**（可用任意 JSON 采集器如 Loki/ELK 直接采集）
+   - 后续：接入日志采集后端 + 落盘 / 滚动，即可完整可观测
 
 7. **CORS 中间件**
    - 现状：**已有 `cors.Default()`** 全局中间件，能跨域，但允许任意来源

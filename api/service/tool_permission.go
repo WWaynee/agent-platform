@@ -43,7 +43,9 @@ func (DBPermissionChecker) Check(ctx interfaces.AgentContext, toolName string) e
 		return fmt.Errorf("工具名为空，无权限")
 	}
 
-	cfg, err := storage.GetToolConfig(ctx.TenantID, toolName)
+	// 把 AgentContext 里的 trace_id/tenant/user 翻译成标准 ctx，使存储层日志带同一链路/租户标识。
+	stdCtx := ctx.ToContext(nil)
+	cfg, err := storage.GetToolConfig(stdCtx, ctx.TenantID, toolName)
 	if err == nil {
 		// 有明确配置记录
 		if !cfg.IsEnable {

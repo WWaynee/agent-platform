@@ -26,7 +26,7 @@ func GetTask(c *gin.Context) {
 	}
 
 	tenantID := middleware.GetTenantID(c)
-	task, err := service.GetTaskDetail(tenantID, id)
+	task, err := service.GetTaskDetail(c.Request.Context(), tenantID, id)
 	if err != nil {
 		// 任务不存在/跨租户访问，统一返回 400（带出错提示）
 		response.BadRequest(c, err.Error())
@@ -34,12 +34,12 @@ func GetTask(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{
-		"id":         task.ID,
-		"tenant_id":  task.TenantID,
-		"task_type":  task.TaskType,
-		"biz_id":     task.BizID,
-		"status":     task.Status,
-		"error_msg":  task.ErrorMsg,
+		"id":          task.ID,
+		"tenant_id":   task.TenantID,
+		"task_type":   task.TaskType,
+		"biz_id":      task.BizID,
+		"status":      task.Status,
+		"error_msg":   task.ErrorMsg,
 		"retry_count": task.RetryCount,
 	})
 }

@@ -2,11 +2,14 @@ package observability
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 
+	"agent-platform/agent/interfaces"
 	"agent-platform/config"
 
 	"go.uber.org/zap"
@@ -26,11 +29,11 @@ func TestLogger_InitAndJSON(t *testing.T) {
 		t.Fatal("日志初始化后 global/sugared 不应为 nil")
 	}
 
-	// 打几条不同级别 + 结构化字段的日志
+	// 打几条不同级别 + 结构化字段的日志（验证统一字段规范）
 	Debug("debug 消息")
 	Info("info 消息", zap.String("app", "agent"))
 	Warn("warn 消息")
-	Error("error 消息")
+	Error("error 消息", errors.New("boom"))
 	S().Infof("sugared 格式化 %s", "ok")
 
 	out := buf.String()
@@ -39,7 +42,7 @@ func TestLogger_InitAndJSON(t *testing.T) {
 		t.Fatalf("应有至少 4 条日志，实际 %d 条:\n%s", len(lines), out)
 	}
 
-	// 每条都应是合法 JSON，且包含 ts/level/msg/caller 结构字段
+	// 每条都应是合法 JSON，且包含规范字段 timestamp/level/msg
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -49,14 +52,14 @@ func TestLogger_InitAndJSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			t.Fatalf("日志不是合法 JSON: %q", line)
 		}
-		for _, k := range []string{"ts", "level", "msg", "caller"} {
+		for _, k := range []string{"timestamp", "level", "msg"} {
 			if _, ok := m[k]; !ok {
-				t.Errorf("JSON 日志缺少字段 %q: %s", k, line)
+				t.Errorf("JSON 日志缺少规范字段 %q: %s", k, line)
 			}
 		}
 	}
 
-	t.Logf("✅ 所有日志均为合法 JSON 结构，示例:\n%s", lines[0])
+	t.Logf("✅ 所有日志均为合法 JSON 且含统一字段 timestamp/level/msg，示例:\n%s", lines[0])
 }
 
 // TestLogger_Levels 验证：不同级别日志按级别正确输出、debug 级别生效。
@@ -137,4 +140,88 @@ func TestLogger_Concurrent(t *testing.T) {
 		t.Error("并发日志应有输出")
 	}
 	t.Log("✅ 并发调用正常")
+}
+
+// TestLogger_WithContext 验证：WithContext 从 ctx 自动提取并注入 trace_id/tenant_id/user_id。
+func TestLogger_WithContext(t *testing.T) {
+	var buf bytes.Buffer
+	initForTest(&buf, "debug")
+
+	// 构造携带规范字段的 ctx
+	ctx := context.Background()
+	ctx = interfaces.WithTenantUser(ctx, 1001, 202)
+	ctx = interfaces.WithTraceID(ctx, "trace-abc-123")
+
+	logger := WithContext(ctx)
+	logger.Info("带上下文的业务日志", zap.Int64(FieldLatency, 88))
+
+	var m map[string]interface{}
+	line := strings.TrimSpace(buf.String())
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("非法 JSON: %q", line)
+	}
+	if m["trace_id"] != "trace-abc-123" {
+		t.Errorf("trace_id 应自动注入 = %v", m["trace_id"])
+	}
+	if m["tenant_id"].(float64) != 1001 {
+		t.Errorf("tenant_id 应自动注入 = %v", m["tenant_id"])
+	}
+	if m["user_id"].(float64) != 202 {
+		t.Errorf("user_id 应自动注入 = %v", m["user_id"])
+	}
+	if m["latency"].(float64) != 88 {
+		t.Errorf("latency 应保留 = %v", m["latency"])
+	}
+	t.Log("✅ WithContext 自动带上了 trace_id/tenant_id/user_id 且保留调用方字段")
+
+	// 空 ctx 不应 panic，且不注入任何规范字段
+	var buf2 bytes.Buffer
+	initForTest(&buf2, "debug")
+	WithContext(nil).Info("无 ctx 日志")
+	if !strings.Contains(buf2.String(), "无 ctx 日志") {
+		t.Error("nil ctx 应能正常打日志")
+	}
+}
+
+// TestLogger_ErrorField 验证：Error(msg, err, ...) 自动带 error 字段且级别为 error。
+func TestLogger_ErrorField(t *testing.T) {
+	var buf bytes.Buffer
+	initForTest(&buf, "debug")
+	Error("操作失败", errors.New("磁盘写入错误"), zap.String("stage", "save"))
+
+	var m map[string]interface{}
+	line := strings.TrimSpace(buf.String())
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("非法 JSON: %q", line)
+	}
+	if m["level"] != "error" {
+		t.Errorf("级别应为 error，实际 %v", m["level"])
+	}
+	if m["stage"] != "save" {
+		t.Errorf("其余字段应保留 = %v", m["stage"])
+	}
+	errStr, ok := m["error"].(string)
+	if !ok || !strings.Contains(errStr, "磁盘写入错误") {
+		t.Errorf("error 字段应包含错误信息 = %v", m["error"])
+	}
+	t.Log("✅ Error 自动带 error 字段、级别 error")
+}
+
+// TestLogger_ErrorNil 验证：Error(msg, nil) 不产生 error 字段也不 panic。
+func TestLogger_ErrorNil(t *testing.T) {
+	var buf bytes.Buffer
+	initForTest(&buf, "debug")
+	Error("无错误的 error 日志", nil)
+
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &m); err != nil {
+		t.Fatalf("非法 JSON: %q", buf.String())
+	}
+	if _, hasErr := m["error"]; hasErr {
+		t.Errorf("err 为 nil 时不应有 error 字段")
+	}
+	if m["level"] != "error" {
+		t.Errorf("级别应为 error")
+	}
+	t.Log("✅ Error(..., nil) 正常且无 error 字段")
 }

@@ -37,7 +37,7 @@ func Register(c *gin.Context) {
 		return
 	}
 
-	user, err := service.Register(req.TenantID, req.Username, req.Password, req.Role)
+	user, err := service.Register(c.Request.Context(), req.TenantID, req.Username, req.Password, req.Role)
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
@@ -54,7 +54,7 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	user, err := service.Login(req.TenantID, req.Username, req.Password)
+	user, err := service.Login(c.Request.Context(), req.TenantID, req.Username, req.Password)
 	if err != nil {
 		// 登录失败统一返回 401（不区分用户不存在/密码错误，防探测）
 		response.FailStatus(c, 401, response.CodeUnauthorized, err.Error())

@@ -195,39 +195,39 @@ var ErrDocumentNotFound = errors.New("文档不存在或无权访问")
 //
 // 幂等说明：点 ID 用 (documentID<<32 | chunkIndex) 合成，同一文档重复处理会覆盖同 ID 的点，
 // 不会产生重复向量。
-func ProcessDocument(tenantID, documentID uint64) error {
+func ProcessDocument(ctx context.Context, tenantID, documentID uint64) error {
 	// 1. 查文档，拿 MinIO object key
-	doc, err := storage.GetDocumentByID(tenantID, documentID)
+	doc, err := storage.GetDocumentByID(ctx, tenantID, documentID)
 	if err != nil {
 		// 文档不存在（或不属于当前租户）：直接返回哨兵错误，不尝试置 failed。
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrDocumentNotFound
 		}
 		// 其他数据库异常：正常走失败处理，置 failed 并记录原因
-		return failProcess(documentID, fmt.Errorf("查询文档失败: %w", err))
+		return failProcess(ctx, documentID, fmt.Errorf("查询文档失败: %w", err))
 	}
 
 	// 1.5 标记正在处理（processing），供前端轮询状态
 	// 从此刻起若后续任何一步失败，都会把状态覆盖为 failed 并记录原因
-	if err := storage.UpdateDocumentStatus(documentID, "processing"); err != nil {
-		return failProcess(documentID, fmt.Errorf("更新文档为处理中失败: %w", err))
+	if err := storage.UpdateDocumentStatus(ctx, documentID, "processing"); err != nil {
+		return failProcess(ctx, documentID, fmt.Errorf("更新文档为处理中失败: %w", err))
 	}
 
 	// 2. 下载并读取文本
 	text, err := ReadTextDocument(doc.MinioObjectKey, doc.Name)
 	if err != nil {
-		return failProcess(documentID, fmt.Errorf("读取文档失败: %w", err))
+		return failProcess(ctx, documentID, fmt.Errorf("读取文档失败: %w", err))
 	}
 
 	// 3. 切片
 	chunks := SplitText(text)
 	if len(chunks) == 0 {
-		return failProcess(documentID, fmt.Errorf("文档内容为空，无可切片文本"))
+		return failProcess(ctx, documentID, fmt.Errorf("文档内容为空，无可切片文本"))
 	}
 
 	// 4. 分批 Embedding（一次请求一批，避免逐条调用浪费时间）
+	//    用贯穿下来的 ctx（携带 trace_id/tenant_id），LLM 调用日志自动带链路/租户身份。
 	llm := llmclient.NewClient(config.GlobalConfig.LLM)
-	ctx := context.Background()
 
 	// 先为每片生成向量（顺序与 chunks 一一对应）
 	vectors := make([][]float32, len(chunks))
@@ -239,11 +239,11 @@ func ProcessDocument(tenantID, documentID uint64) error {
 		batch := chunks[start:end]
 		resp, err := llm.EmbedBatch(ctx, llmclient.EmbeddingBatchRequest{Inputs: batch})
 		if err != nil {
-			return failProcess(documentID, fmt.Errorf("批量向量化切片[%d:%d]失败: %w", start, end, err))
+			return failProcess(ctx, documentID, fmt.Errorf("批量向量化切片[%d:%d]失败: %w", start, end, err))
 		}
 		// 防御：返回向量数量必须等于本批切片数，否则向量与切片对不上，写入会错位
 		if len(resp.Vectors) != len(batch) {
-			return failProcess(documentID, fmt.Errorf(
+			return failProcess(ctx, documentID, fmt.Errorf(
 				"批量向量化切片[%d:%d]数量不符: 请求 %d 条，返回 %d 条", start, end, len(batch), len(resp.Vectors)))
 		}
 		copy(vectors[start:end], resp.Vectors)
@@ -262,11 +262,11 @@ func ProcessDocument(tenantID, documentID uint64) error {
 		})
 	}
 	if err := storage.UpsertVectors(ctx, points); err != nil {
-		return failProcess(documentID, fmt.Errorf("批量写入向量库失败: %w", err))
+		return failProcess(ctx, documentID, fmt.Errorf("批量写入向量库失败: %w", err))
 	}
 
 	// 6. 更新状态为 success
-	if err := storage.UpdateDocumentResult(documentID, "success", ""); err != nil {
+	if err := storage.UpdateDocumentResult(ctx, documentID, "success", ""); err != nil {
 		return fmt.Errorf("更新文档状态失败: %w", err)
 	}
 	return nil
@@ -281,9 +281,10 @@ func composePointID(documentID uint64, chunkIndex int) uint64 {
 }
 
 // failProcess 统一处理失败：把文档状态置为 failed 并记录错误信息，返回原始错误。
+// ctx 携带请求级 trace_id/tenant_id，透传给 storage 使状态落库日志带同一链路 ID。
 // 说明：状态落库失败时，仍返回原始错误（以主流程错误为准）；仅打印落库错误供排查。
-func failProcess(documentID uint64, processErr error) error {
-	if uerr := storage.UpdateDocumentResult(documentID, "failed", processErr.Error()); uerr != nil {
+func failProcess(ctx context.Context, documentID uint64, processErr error) error {
+	if uerr := storage.UpdateDocumentResult(ctx, documentID, "failed", processErr.Error()); uerr != nil {
 		// 连状态都更新不上属于严重问题，返回组合错误便于定位
 		return fmt.Errorf("%v；此外更新失败状态时报错: %w", processErr, uerr)
 	}

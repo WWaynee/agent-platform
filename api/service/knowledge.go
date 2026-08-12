@@ -27,15 +27,17 @@ const defaultSearchTopK = 3
 //   - DocumentID: 命中片段所属文档 ID（便于溯源回跳文档）
 //   - ChunkIndex: 片段在文档内的切片序号（从 0 开始）
 type SearchHit struct {
-	Content     string  `json:"content"`
-	Score       float32 `json:"score"`
-	DocumentID  uint64  `json:"document_id"`
-	ChunkIndex  int     `json:"chunk_index"`
+	Content    string  `json:"content"`
+	Score      float32 `json:"score"`
+	DocumentID uint64  `json:"document_id"`
+	ChunkIndex int     `json:"chunk_index"`
 }
 
 // Search 知识库语义检索：把 query 转成向量 → 在向量库中检索最相关的 topK 个片段。
 //
 // 入参：
+//   - ctx：请求级上下文（携带 trace_id/tenant_id），透传给 Embedding 与向量检索，
+//     使查询向量化/检索日志与整条链路共享同一 trace_id
 //   - tenantID：当前租户 ID（**必须从 JWT 上下文传入**，多租户隔离关键）
 //   - query：用户的自然语言问题/检索词
 //   - topK：期望返回的片段条数；<=0 时使用默认值 3
@@ -44,14 +46,13 @@ type SearchHit struct {
 //  1. 调用 Embedding 把 query 转成向量（与文档切片同模型，同 4096 维）
 //  2. 调用 storage.SearchVectors 按 tenant_id 强制过滤检索（多租户隔离在 storage 层死守）
 //  3. 把命中的原始片段组装成 SearchHit 列表返回
-func Search(tenantID uint64, query string, topK int) ([]SearchHit, error) {
+func Search(ctx context.Context, tenantID uint64, query string, topK int) ([]SearchHit, error) {
 	if topK <= 0 {
 		topK = defaultSearchTopK
 	}
 
 	// 1. query 转向量（复用与文档切片一致的双层客户端，留空自动回退主配置）
 	llm := llmclient.NewClient(config.GlobalConfig.LLM)
-	ctx := context.Background()
 	resp, err := llm.Embed(ctx, llmclient.EmbeddingRequest{Input: query})
 	if err != nil {
 		return nil, fmt.Errorf("查询向量化失败: %w", err)

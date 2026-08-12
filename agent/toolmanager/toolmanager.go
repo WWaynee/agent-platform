@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"agent-platform/agent/interfaces"
+	"agent-platform/observability"
+
+	"go.uber.org/zap"
 )
 
 // ============ 工具权限校验 ============
@@ -134,5 +138,32 @@ func (m *ToolManager) ExecuteTool(ctx interfaces.AgentContext, name, params stri
 	}
 
 	// ③ 通过校验，执行工具
-	return tool.Execute(ctx, params)
+	logger := observability.WithTenantUser(ctx.TenantID, ctx.UserID)
+	start := time.Now()
+
+	// 调用工具前：记录 tool_name / params
+	// ⚠️ params 来自 LLM 生成，可能与 LLM 输入产生重叠，这里只记录（工具执行场景需要，便于排查）；
+	//    若个别工具参数含敏感信息，应在工具自身的日志处理里规避。
+	logger.Info("调用工具",
+		zap.String("tool_name", name),
+		zap.String("params", params),
+	)
+
+	result, err := tool.Execute(ctx, params)
+
+	// 调用工具后：记录耗时、是否成功
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		logger.Error("工具执行失败",
+			zap.Error(err),
+			zap.String("tool_name", name),
+			zap.Int64(observability.FieldLatency, latency),
+		)
+		return "", err
+	}
+	logger.Info("工具执行成功",
+		zap.String("tool_name", name),
+		zap.Int64(observability.FieldLatency, latency),
+	)
+	return result, nil
 }
