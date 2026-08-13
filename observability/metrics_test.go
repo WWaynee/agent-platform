@@ -2,6 +2,9 @@ package observability
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -154,4 +157,81 @@ func testMetricText(t *testing.T) string {
 		}
 	}
 	return buf.String()
+}
+
+// TestMetrics_HTTPEndpoint 验证 /metrics 端点（MetricsHandler）：
+//  1. 返回 HTTP 200；
+//  2. Content-Type 为 Prometheus 标准文本格式（text/plain; version=0.0.4; charset=utf-8）；
+//  3. 文本包含已埋点的核心指标（Prometheus 文本格式）；
+//  4. 发一次请求（打点）后，指标数值随之变化。
+func TestMetrics_HTTPEndpoint(t *testing.T) {
+	// 用 MetricsHandler 经标准库 handler 响应一次抓取
+	srv := httptest.NewServer(MetricsHandler())
+	defer srv.Close()
+
+	// promauto 的 Vec 指标为惰性：未实例化（With 标签）前不会出现在抓取结果里。
+	// 先在默认注册表实例化各核心指标，确保抓取文本里能看到它们的 HELP/TYPE 行。
+	HTTPRequestsTotal.WithLabelValues("GET", "/health", "200")
+	HTTPRequestDuration.WithLabelValues("GET", "/health", "200")
+	LLMCallsTotal.WithLabelValues("deepseek-chat", "true")
+	LLMTokensTotal.WithLabelValues("deepseek-chat")
+	ToolCallsTotal.WithLabelValues("echo", "true")
+	MQMessagesTotal.WithLabelValues("document_parse", "ack")
+
+	// 首次抓取：仅校验格式与指标名存在（不依赖具体累计值）
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("请求 /metrics 失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/metrics 应返回 200，实际 %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") || !strings.Contains(ct, "version=0.0.4") {
+		t.Errorf("Content-Type 应为 Prometheus 文本格式，实际 %q", ct)
+	}
+
+	body := new(bytes.Buffer)
+	_, _ = body.ReadFrom(resp.Body)
+	out := body.String()
+
+	// 标准格式特征：# HELP / # TYPE 行 + 各指标名
+	for _, substr := range []string{
+		"# HELP http_requests_total",
+		"# TYPE http_requests_total counter",
+		"# HELP http_request_duration_seconds",
+		"# TYPE http_request_duration_seconds histogram",
+		"# HELP llm_calls_total",
+		"# TYPE llm_calls_total counter",
+		"llm_tokens_total",
+		"tool_calls_total",
+		"mq_messages_total",
+	} {
+		if !strings.Contains(out, substr) {
+			t.Errorf("/metrics 文本缺少 Prometheus 元素 %q", substr)
+		}
+	}
+
+	// 发请求（打点）后数值变化：GET/health 200 再 +1
+	IncHTTPRequest("GET", "/health", "200", 0.05)
+	got := testutil.ToFloat64(HTTPRequestsTotal.With(prometheus.Labels{"method": "GET", "path": "/health", "status_code": "200"}))
+	if got < 1 {
+		t.Errorf("打点后 http_requests_total{GET,/health,200} 应 >=1，实际 %v", got)
+	}
+
+	// 再次抓取，确认该指标出现在文本且值=最新计数
+	resp2, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("二次请求 /metrics 失败: %v", err)
+	}
+	defer resp2.Body.Close()
+	body2 := new(bytes.Buffer)
+	_, _ = body2.ReadFrom(resp2.Body)
+	if !strings.Contains(body2.String(), fmt.Sprintf(`http_requests_total{method="GET",path="/health",status_code="200"} %d`, int64(got))) {
+		t.Errorf("/metrics 未反映最新计数（值=%v）:\n%.300s", got, body2.String())
+	}
+
+	t.Log("✅ /metrics 端点正常：标准 Prometheus 文本格式，指标可被抓取，打点后数值变化")
 }

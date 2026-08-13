@@ -151,6 +151,10 @@ func (m *ToolManager) ExecuteTool(ctx interfaces.AgentContext, name, params stri
 
 	result, err := tool.Execute(ctx, params)
 
+	// Prometheus 指标埋点：工具调用计数 +1（标签 tool_name / success）。
+	// 标签用低基数 tool_name / success（不用 trace_id/user_id，防基数爆炸）。
+	observability.IncToolCall(name, err == nil)
+
 	// 调用工具后：记录耗时、是否成功
 	latency := time.Since(start).Milliseconds()
 	if err != nil {

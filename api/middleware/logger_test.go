@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"agent-platform/agent/interfaces"
 	"agent-platform/observability"
@@ -81,6 +82,90 @@ func TestLogger_RequestChain(t *testing.T) {
 	}
 
 	t.Logf("✅ 一次请求产生完整链路日志，请求结束日志: %s", findLine(lines, "请求结束"))
+}
+
+// TestLogger_PrometheusMetric 验证：发一次请求后，http_requests_total +1、
+// http_request_duration_seconds 记录耗时，且 method/path/status_code 维度标签正确。
+func TestLogger_PrometheusMetric(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_ = observability.InitWith(&bytes.Buffer{}, "info")
+
+	engine := gin.New()
+	engine.Use(Logger())
+	engine.GET("/api/metrics-check", func(c *gin.Context) {
+		c.Status(200)
+	})
+	engine.POST("/api/metrics-check", func(c *gin.Context) {
+		c.Status(400)
+	})
+
+	// 记录打点前的基数
+	before := counterValue(t, "http_requests_total",
+		prometheus.Labels{"method": "GET", "path": "/api/metrics-check", "status_code": "200"})
+
+	// 发 2 次 GET 200 + 1 次 POST 400
+	performRequest(engine, "GET", "/api/metrics-check")
+	performRequest(engine, "GET", "/api/metrics-check")
+	performRequest(engine, "POST", "/api/metrics-check")
+
+	// GET/200 应为 +2
+	got := counterValue(t, "http_requests_total",
+		prometheus.Labels{"method": "GET", "path": "/api/metrics-check", "status_code": "200"})
+	if got-before != 2 {
+		t.Errorf("HTTP GET/200 计数应 +2，实际 %v→%v", before, got)
+	}
+	// POST/400 首次出现应为 +1
+	gotPost := counterValue(t, "http_requests_total",
+		prometheus.Labels{"method": "POST", "path": "/api/metrics-check", "status_code": "400"})
+	if gotPost != 1 {
+		t.Errorf("HTTP POST/400 计数应 =1，实际 %v", gotPost)
+	}
+	// 耗时 histogram 的 sample_count 也应等于请求数（GET/200 应为 2）
+	histCount := counterValue(t, "http_request_duration_seconds",
+		prometheus.Labels{"method": "GET", "path": "/api/metrics-check", "status_code": "200"})
+	if histCount != 2 {
+		t.Errorf("histogram sample_count 应 =2，实际 %v", histCount)
+	}
+
+	t.Logf("✅ HTTP 埋点生效：GET/200=+2、POST/400=+1，耗时 histogram sample_count=2，维度标签(method/path/status_code)正确")
+}
+
+// counterValue 从默认注册表读取指定指标（counter value 或 histogram sample_count）
+// 在给定标签集合下的值；找不到该标签组合返回 0。
+func counterValue(t *testing.T, name string, labels prometheus.Labels) float64 {
+	t.Helper()
+	gather, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("收集指标失败: %v", err)
+	}
+	for _, mf := range gather {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			got := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				got[lp.GetName()] = lp.GetValue()
+			}
+			match := true
+			for k, v := range labels {
+				if got[k] != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			if mc := m.GetCounter(); mc != nil {
+				return mc.GetValue()
+			}
+			if mh := m.GetHistogram(); mh != nil {
+				return float64(mh.GetSampleCount())
+			}
+		}
+	}
+	return 0
 }
 
 // findLine 返回包含关键字的日志行。

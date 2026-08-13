@@ -82,7 +82,10 @@ type RabbitMQConfig struct {
 
 // 服务配置
 type ServerConfig struct {
-	HTTPPort int // HTTP 监听端口
+	HTTPPort int // HTTP 业务监听端口（公网）
+	// MetricsPort Prometheus 指标监听端口（内网专用，不与公网业务端口混用）。
+	// 设为 0 表示不启动独立 metrics 服务（禁用指标暴露）。
+	MetricsPort int
 }
 
 // LogConfig 日志配置
@@ -207,7 +210,8 @@ func Load() error {
 
 	// Server
 	cfg.Server = ServerConfig{
-		HTTPPort: getEnvInt("SERVER_HTTP_PORT", 8080),
+		HTTPPort:    getEnvInt("SERVER_HTTP_PORT", 8080),
+		MetricsPort: getEnvInt("METRICS_PORT", 9090), // 0 = 禁用独立指标端口
 	}
 
 	// 限流（滑动窗口，Redis 分布式）：租户/用户/对话三层阈值 + 窗口时长

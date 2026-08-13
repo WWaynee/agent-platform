@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
+	"time"
 
 	"agent-platform/agent/engine"
 	"agent-platform/agent/memory"
@@ -14,6 +16,7 @@ import (
 	"agent-platform/config"
 	"agent-platform/llmclient"
 	"agent-platform/mq"
+	"agent-platform/observability"
 	"agent-platform/storage"
 	"agent-platform/toolkit"
 )
@@ -108,7 +111,27 @@ func main() {
 	// 8. 初始化 Gin 引擎（含全局中间件与路由）
 	router := api.NewRouter()
 
-	// 9. 启动 HTTP 服务，监听配置里的端口
+	// 9. 启动独立 Prometheus 指标服务（单独端口，内网访问，与公网业务端口隔离）：
+	//    - 业务接口是公网暴露的，metrics 不应暴露给公网；
+	//    - 单独起一个监听端口（config.MetricsPort，默认 9090，0=禁用），只在内网可达。
+	//    这样 /metrics 不经过 Gin 的业务中间件（登录/限流等），直接暴露指标文本。
+	if cfg.Server.MetricsPort > 0 {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", observability.MetricsHandler())
+		metricSrv := &http.Server{
+			Addr:              fmt.Sprintf(":%d", cfg.Server.MetricsPort),
+			Handler:           metricsMux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			log.Printf("📊 Prometheus 指标服务启动，监听 %s/metrics", metricSrv.Addr)
+			if err := metricSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("指标服务异常: %v", err)
+			}
+		}()
+	}
+
+	// 10. 启动 HTTP 服务，监听配置里的端口
 	addr := fmt.Sprintf(":%d", cfg.Server.HTTPPort)
 	log.Printf("🚀 服务启动，监听 %s", addr)
 	if err := router.Run(addr); err != nil {

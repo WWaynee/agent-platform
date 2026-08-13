@@ -127,6 +127,15 @@ func (c *OpenAIClient) reportUsage(ctx context.Context, ev UsageEvent) {
 	// 无论成功失败都累加计数（失败无 token 消耗，总量不会虚增）
 	c.usageStats.add(ev.Operation, ev.Tokens)
 
+	// Prometheus 指标埋点（LLM 计数是该客户端的统一必经点，覆盖 Chat/Embed/EmbedBatch）：
+	//  - llm_calls_total +1（标签 model / success）
+	//  - llm_tokens_total 累计 token（标签 model）
+	// 标签用低基数 model / success（不用 trace_id/user_id，防基数爆炸）。
+	observability.IncLLMCall(ev.Model, ev.Success)
+	if ev.Tokens.TotalTokens > 0 {
+		observability.AddLLMTokens(ev.Model, float64(ev.Tokens.TotalTokens))
+	}
+
 	// ① LLM 调用日志（关键链路）：记录 model / 时长 / token 用量 / 是否成功 / 错误信息。
 	//    经 WithContext 自动带上 trace_id / tenant_id（若 ctx 携带）。
 	logger := observability.WithContext(ctx)

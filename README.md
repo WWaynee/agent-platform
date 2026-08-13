@@ -404,11 +404,14 @@
 - [x] 全链路 TraceID 生成与透传（HTTP 入口生成/透传 → Agent → LLM → 工具 → 存储全链路贯穿，MQ 生产/消费同链路）
 - [x] 结构化日志封装（observability：JSON 结构化 + 统一字段 trace_id/tenant_id/user_id/latency）
 - [x] 日志携带 TraceID（WithContext / WithAgentContext / 自定义 GORM logger 自动注入）
-- [ ] 接入 Prometheus 指标
-- [ ] 核心指标埋点：请求量、LLM 调用次数
+- [x] 接入 Prometheus 指标（observability/metrics.go：默认注册表 + MetricsHandler 暴露 /metrics）
+- [x] 核心指标埋点：请求量(HTTP 中间件)、LLM 调用次数/token、工具调用、MQ 消息处理
+- [x] Prometheus 指标独立内网端口暴露（服务端 `METRICS_PORT`，默认 9090，0=禁用；/metrics 不走公网业务中间件）
+- [x] /health 详细健康检查（检查 MySQL/Redis/MinIO/Qdrant/RabbitMQ 五个依赖，返回各组件状态，异常返回 503，适配探针语义）
 - [ ] 审计日志写入
-- [ ] 测试：一条请求全链路 TraceID 一致（详见本日"遇到的问题与解决方案"）
-- [ ] 测试：Prometheus 能采集到指标
+- [x] 测试：一条请求全链路 TraceID 一致（详见本日"遇到的问题与解决方案"）
+- [x] 测试：Prometheus 能采集到指标（/metrics 返回标准文本格式 + 打点后计数变化）
+- [x] 测试：健康检查各组件 up/down、异常时 HTTP 503、JSON 结构（status + components map + errors）
 
 #### 📌 周四遇到的问题与解决方案
 
@@ -423,6 +426,24 @@
 
 4. **日志字段要统一、可被采集系统解析**：各层手写 `fmt.Printf` 字段不规范难聚合。
    → 统一抽象到 `observability`：JSON 结构化 + 字段常量（`FieldTraceID/FieldTenantID/FieldUserID/FieldLatency/FieldError`）；`WithContext/WithTenantUser/WithAgentContext` 自动注入身份字段，`logger.Info/Error` 即带 trace_id。
+
+5. **Prometheus 指标不能暴露公网，但又要能被采集**：`/metrics` 若挂在业务端口会公网可访问（泄露内部指标、耗资源），还经过登录/限流等业务中间件。
+   → 独立启动一个**内网监听端口**（`config.Server.MetricsPort`，默认 9090，0=禁用）：`cmd/api/main.go` 单独 `go` 协程起 `http.Server`，只挂 `/metrics`（`observability.MetricsHandler()`），**不经 Gin 业务中间件**，只在内网可达，与公网业务端口隔离。
+   ⚠️ 注意点：metrics 端口应只在内网/VPC 内可访问，或加鉴权，绝不能暴露到公网。
+
+6. **指标标签维度太多会"基数爆炸"**：若把 `user_id`/`trace_id`/具体参数当标签，每个用户/请求都会新增一组时序，Prometheus 内存会扛不住。
+   → 所有埋点标签只用**低基数枚举**：HTTP 用 `method/path/status_code`，LLM 用 `model/success`，工具用 `tool_name/success`，MQ 用 `queue/status`。trace_id/user_id 走日志字段、**绝不进指标标签**（见 `observability/metrics.go` 各 Vec 注释）。
+
+7. **健康检查从"简单返回 running"升级为"反映依赖真实状态"**：最初的 `/health` 只固定返回 200+`{status:running}`，进程活着但依赖全挂也会被判"健康"，探针失去意义。
+   → 重写成 `api/service/health.go` + `api/handler/health.go`：
+   - 逐一检查 **MySQL(SELECT 1) / Redis(PING) / MinIO(查 bucket) / Qdrant(查集合) / RabbitMQ(开临时 Channel)**，每个返回 `up/down` + down 时带错误信息；
+   - 返回 `{status, components:{mysql:up,...}, errors:{mysql:"..."}}`；
+   - **任一依赖 down → overall unhealthy → HTTP 503**（K8s/Docker 探针据此剔除故障实例）；全部正常 → 200；
+   - 每个检查带 3s 超时 + `WithContext` 打日志带 trace_id，避免依赖 HANG 卡死探针或丢失链路。
+   ⚠️ 注意点：探针状态码语义——200=健康、503=故障，不要用 200 掩盖依赖故障；健康检查要设超时，否则依赖无响应会让探针自身挂起。
+
+8. **健康检查返回值结构要方便探针/前端解析**：若 components 值用嵌套对象，探针脚本和前端都要多一层解析。
+   → `components` 值统一为字符串 `"up"/"down"`（可直接判断），down 组件的具体错误信息放在独立的 `errors` map（仅 down 时存在、`omitempty` 省略），一个 JSON 里兼顾"简单判断"与"详细排查"。
 
 #### 周五・全链路联调 & 异常测试
 
@@ -463,8 +484,8 @@
 | 对象存储 | MinIO |
 | 向量库 | Qdrant |
 | 消息队列 | RabbitMQ |
-| 监控 | Prometheus（指标埋点待接入）|
-| 可观测 | 结构化 JSON 日志（observability，JSON 采集器可直接对接）|
+| 监控 | Prometheus（observability/metrics.go，独立内网端口 /metrics，指标：HTTP/LLM/工具/MQ）|
+| 可观测 | 结构化 JSON 日志（observability，JSON 采集器可直接对接）+ 全链路 TraceID + 详细 /health 健康检查 |
 | 大模型 | DeepSeek 对话（OpenAI 兼容）；向量走硅基流动（SiliconFlow）|
 | 部署 | Docker Compose |
 
@@ -485,7 +506,9 @@ go run cmd/api/main.go        # API 服务（接请求、上传时投递 MQ 消�
 go run cmd/worker/main.go     # Worker 独立进程（消费 document_parse 队列、执行异步解析，可多开扩容）
 ```
 
-服务启动后访问：`http://127.0.0.1:端口/health`
+服务启动后访问：
+- 健康检查（详细依赖状态）：`http://127.0.0.1:{HTTP_PORT}/health`（全部正常 200，任一依赖挂 503）
+- Prometheus 指标（独立内网端口）：`http://127.0.0.1:{METRICS_PORT}/metrics`（默认 9090，0=禁用）
 
 ## ⚠️ 注意事项（精要）
 
@@ -493,6 +516,10 @@ go run cmd/worker/main.go     # Worker 独立进程（消费 document_parse 队�
 - **重启不丢**：会话消息 / 用量 / 限流计数在 Redis；文档与元数据在 MySQL/MinIO，内存里没有业务状态，重启安全。
 - **可观测为结构化 JSON**：日志统一走 `observability` 输出 JSON（含 `trace_id/tenant_id/user_id/latency`），可按采集器直接接入。
 - **trace_id 贯穿**：HTTP 入口生成/透传，经 Agent/LLM/工具/存储，并随 MQ 消息带到消费端；排查问题先看 trace_id。
+- **日志别打敏感信息（红线）**：密码、`api_key`、token、用户隐私数据一律不落日志（脱敏或干脆不打），这是安全底线。
+- **指标标签要低基数**：只用 `method/status_code/model/tool_name/queue` 等枚举值，**绝不把 `user_id/trace_id/参数` 当标签**，否则 Prometheus 基数爆炸。
+- **`/metrics` 不要暴露公网**：独立 `METRICS_PORT`（默认 9090）内网访问，或加鉴权，防止泄露内部指标。
+- **`/health` 是探针语义**：任一依赖 down 返回 **503**（编排系统据此剔除故障实例），不要用 200 掩盖依赖故障。
 - **多租户隔离底线在数据层死守**：新增任何跨租户查询，一律从 ctx/JWT 取 `tenant_id`，不要信前端传入。
 - **bool 开关勿用 `gorm:"default:true"`**：零值 false 会被当"未赋值"覆盖成 true，导致"关闭"失效（详见第二周周二）。
 - **生产部署前**：务必处理下方"上线前需调整"清单（换密钥、GIN_MODE=release、接采集、限 CORS）。
@@ -532,7 +559,7 @@ agent-platform/
 │
 ├── api/                       # HTTP 接口层（Gin）
 │   ├── router.go              #   路由注册：公开组 / 私有组（JWT 鉴权）/ 管理组 admin（JWT+AdminAuth）
-│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go / session.go / task.go / tool_admin.go / usage.go
+│   ├── handler/               #   处理器：tenant.go / user.go / document.go / knowledge.go / chat.go / session.go / task.go / tool_admin.go / usage.go / health.go(详细健康检查，依赖异常返503)
 │   ├── service/               #   业务逻辑：与 handler 对应（调 storage，强制 tenant_id 过滤）
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
@@ -543,7 +570,8 @@ agent-platform/
 │   │   ├── tool_admin.go      #   工具开关配置（租户管理）：GetToolEnabled / UpdateToolEnabled（查不到默认启用）
 │   │   ├── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
 │   │   ├── usage.go           #   Token 用量统计业务：实现 llmclient.UsageReporter 钩子（从 ctx 取租户/用户→Redis 累加）+ 当天/历史查询
-│   │   └── quota.go           #   租户 Token 配额校验：CheckTenantTokenQuota（读 QuotaLlmToken + 当月 Redis 用量对比）
+│   │   ├── quota.go           #   租户 Token 配额校验：CheckTenantTokenQuota（读 QuotaLlmToken + 当月 Redis 用量对比）
+│   │   └── health.go          #   依赖健康检查：CheckMySQL/Redis/MinIO/Qdrant/RabbitMQ（各带超时）+ CheckAll 聚合(任一 down→unhealthy)
 │   ├── middleware/            #   中间件：trace(生成/透传trace_id) / recovery / logger(结构化带trace) / cors
 │   │                          #   / JWT / admin / context / ratelimit(限流) / quota(配额)
 │   ├── response/              #   统一返回格式与错误码工具
@@ -617,10 +645,13 @@ agent-platform/
 ├── toolkit/                    # 可插拔工具集（Agent 调用能力注入）
 │   ├── echo_tool.go            #   Echo 测试工具（骨架链路验证）
 │   └── knowledge_retrieve.go   #   知识库检索工具（RAG 核心，调 service.Search，按 ctx.TenantID 隔离）
-├── observability/             # 可观测体系（结构化 JSON 日志唯一出入口，第二周周四）
+├── observability/             # 可观测体系（结构化 JSON 日志唯一出入口 + Prometheus 指标，第二周周四）
 │   ├── logger.go              #   日志封装：JSON 结构化 + 字段常量(FieldTraceID/FieldTenantID/FieldUserID/FieldLatency/FieldError)
 │   │                          #   + WithContext(ctx 自动注入 trace/tenant/user 字段) / WithAgentContext(Agent 链路) / WithTenantUser
-│   └── logger_test.go         #   单测（trace_id/tenant_id 字段注入校验）
+│   ├── logger_test.go         #   单测（trace_id/tenant_id 字段注入校验）
+│   ├── metrics.go             #   Prometheus 指标：HTTP请求计数/耗时、LLM调用/token、工具调用、MQ消息 + MetricsHandler 暴露 /metrics
+│   │                          #   （低基数标签 method/status_code/model/tool_name/queue，杜绝 user_id/trace_id 防基数爆炸）
+│   └── metrics_test.go        #   单测（各埋点打点 + /metrics HTTP 端点标准文本格式 + 打点后计数变化）
 │
 └── data/                      # ⛔ 运行时数据，gitignore 排除不入库（本地 Docker 持久化）
     ├── mysql/                 #   MySQL 数据文件
@@ -677,6 +708,7 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
 | `GIN_MODE` | 默认 debug 模式（启动有告警）| 设 `GIN_MODE=release` |
 | CORS 跨域 | `cors.Default()` 允许 `*` 任意来源 | 限制为前端域名白名单 |
 | 日志输出 | `fmt.Printf` 直接打到 stdout | 接结构化日志 + 文件 / 采集（logrus/zap）|
+| 指标端口 | `METRICS_PORT` 默认 9090 监听全部网卡 | 仅供内网/VPC 访问，或前置鉴权；公网关闭（设 0 或防火墙禁止）|
 | 传输安全 | 直接暴露 `:8080` HTTP | 放 Nginx 反向代理 + HTTPS/SSL |
 | DSN 时区 | `loc=Local`（本地时区）| 生产统一为 `loc=UTC` 避免时区歧义 |
 

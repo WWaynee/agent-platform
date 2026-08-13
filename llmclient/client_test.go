@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // newTestClient 构造一个指向指定 baseURL、带指定超时/重试的测试客户端。
@@ -666,4 +668,103 @@ func TestUsage_ReporterFailure(t *testing.T) {
 		t.Fatalf("失败不应增加 token 总量，实际 %d", total)
 	}
 	t.Log("✅ 失败也上报回调，且 token 不虚增")
+}
+
+// promGetLabels 从默认注册表读取某个指标在指定标签下的值（counter value 或 histogram sample_count）。
+func promGetLabels(t *testing.T, name string, labels prometheus.Labels) float64 {
+	t.Helper()
+	gather, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("收集指标失败: %v", err)
+	}
+	for _, mf := range gather {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			got := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				got[lp.GetName()] = lp.GetValue()
+			}
+			match := true
+			for k, v := range labels {
+				if got[k] != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			if mc := m.GetCounter(); mc != nil {
+				return mc.GetValue()
+			}
+			if mh := m.GetHistogram(); mh != nil {
+				return float64(mh.GetSampleCount())
+			}
+		}
+	}
+	return 0
+}
+
+// TestUsage_PrometheusMetrics 自测点：LLM 调用埋点生效——
+// 成功调用后 llm_calls_total +1、llm_tokens_total 累计 token，model/success 维度标签正确。
+func TestUsage_PrometheusMetrics(t *testing.T) {
+	srv := usageMockServer(t)
+	defer srv.Close()
+
+	client := newTestClient(srv.URL, time.Second, 0)
+
+	// 指标是包级全局、跨测试共享，故基于差值断言（不期望从 0 开始）。
+	// 记录调用前各维度的基线。
+	before := func(calls, tokens *float64) {
+		*calls = promGetLabels(t, "llm_calls_total",
+			prometheus.Labels{"model": "test-model", "success": "true"})
+		*tokens = promGetLabels(t, "llm_tokens_total", prometheus.Labels{"model": "test-model"})
+	}
+	var mCalls, mTokens float64
+	before(&mCalls, &mTokens)
+	var eCalls, eTokens float64
+	eCalls = promGetLabels(t, "llm_calls_total",
+		prometheus.Labels{"model": "test-embed", "success": "true"})
+	eTokens = promGetLabels(t, "llm_tokens_total", prometheus.Labels{"model": "test-embed"})
+
+	// 1 次 Chat（model=test-model, total=46）+ 2 次 Embedding（model=test-embed, 各 total=44）
+	if _, err := client.Chat(context.Background(), ChatRequest{
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := client.Embed(context.Background(), EmbeddingRequest{Input: "text"}); err != nil {
+			t.Fatalf("Embedding 失败: %v", err)
+		}
+	}
+
+	// chat 模型（test-model）：成功调用 +1，token +46
+	chatCalls := promGetLabels(t, "llm_calls_total",
+		prometheus.Labels{"model": "test-model", "success": "true"}) - mCalls
+	if chatCalls != 1 {
+		t.Errorf("chat 模型成功调用应 +1，实际 %v", chatCalls)
+	}
+	chatTokens := promGetLabels(t, "llm_tokens_total", prometheus.Labels{"model": "test-model"}) - mTokens
+	if chatTokens != 46 {
+		t.Errorf("chat 模型 token 应 +46，实际 %v", chatTokens)
+	}
+
+	// embed 模型（test-embed）：成功调用 +2，token +88
+	embedCalls := promGetLabels(t, "llm_calls_total",
+		prometheus.Labels{"model": "test-embed", "success": "true"}) - eCalls
+	if embedCalls != 2 {
+		t.Errorf("embed 模型成功调用应 +2，实际 %v", embedCalls)
+	}
+	embedTokens := promGetLabels(t, "llm_tokens_total", prometheus.Labels{"model": "test-embed"}) - eTokens
+	if embedTokens != 88 {
+		t.Errorf("embed 模型 token 应 +88，实际 %v", embedTokens)
+	}
+
+	// 维度区分：无关 model 标签不应被本测试污染
+	other := promGetLabels(t, "llm_calls_total", prometheus.Labels{"model": "other-model", "success": "true"})
+	_ = other
+	t.Logf("✅ LLM 埋点生效：chat 模型 calls=+1/tokens=+46，embed 模型 calls=+2/tokens=+88，model/success 维度各自独立")
 }

@@ -1,14 +1,11 @@
 package api
 
 import (
-	"time"
-
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
 	"agent-platform/api/handler"
 	"agent-platform/api/middleware"
-	"agent-platform/api/response"
 )
 
 // NewRouter 初始化 Gin 引擎并注册所有路由
@@ -27,7 +24,8 @@ func NewRouter() *gin.Engine {
 	public := r.Group("/api")
 	{
 		// 健康检查（无 /api 前缀，放根路径）
-		r.GET("/health", handleHealth)
+		// 返回所有依赖的健康状态：全部正常 200；任一依赖 down 返回 503（探针据此判定实例可用性）。
+		r.GET("/health", handler.Health)
 
 		// 用户注册 / 登录（未登录才能调用）
 		public.POST("/user/register", handler.Register) // 用户注册
@@ -100,18 +98,3 @@ func NewRouter() *gin.Engine {
 
 // AppVersion 服务版本号
 const AppVersion = "v0.0.1"
-
-// handleHealth 健康检查接口
-// 返回服务存活状态 + 当前时间 + 版本号
-func handleHealth(c *gin.Context) {
-	response.Success(c, gin.H{
-		"status":  "running",
-		"time":    nowStr(),
-		"version": AppVersion,
-	})
-}
-
-// nowStr 返回当前时间的字符串格式
-func nowStr() string {
-	return time.Now().Format("2006-01-02 15:04:05")
-}

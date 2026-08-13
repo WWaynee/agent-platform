@@ -9,6 +9,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"agent-platform/config"
+	"agent-platform/observability"
 )
 
 // ============ RabbitMQ 基础客户端封装 ============
@@ -154,16 +155,21 @@ func Consume(queueName string, handler func([]byte) error) error {
 		// 单个消息的处理（含 panic 捕获），返回未经包装的判断结果
 		processErr := safeProcess(handler, d.Body)
 
+		// Prometheus 指标埋点：MQ 消息处理计数 +1（标签 queue / status）。
+		// status 取枚举值 ack/requeue/error（低基数；不用 trace_id/msg_id，防基数爆炸）。
 		switch {
 		case processErr == nil:
 			// 成功：确认，消息移除
 			_ = d.Ack(false)
+			observability.IncMQMessage(queueName, "ack")
 		case errors.Is(processErr, ErrRequeue):
 			// 需要重试：不确认，消息重新入队，之后还能再消费
 			_ = d.Nack(false, true) // multiple=false, requeue=true
+			observability.IncMQMessage(queueName, "requeue")
 		default:
 			// 最终失败（或 panic 转成的错误）：也 Ack 确认丢弃，避免无限重复消费
 			_ = d.Ack(false)
+			observability.IncMQMessage(queueName, "error")
 		}
 	}
 	return nil

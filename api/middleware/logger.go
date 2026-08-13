@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -40,6 +41,10 @@ func Logger() gin.HandlerFunc {
 
 		status := c.Writer.Status()
 		latency := time.Since(start)
+
+		// Prometheus 指标埋点：请求总数 +1，耗时(秒)记入 histogram。
+		// 标签只用 method/path/status_code 等低基数维度（不用 trace_id/user_id，防基数爆炸）。
+		observability.IncHTTPRequest(method, path, fmt.Sprint(status), latency.Seconds())
 
 		fields := []zap.Field{
 			zap.String("method", method),

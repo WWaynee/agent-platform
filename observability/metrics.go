@@ -1,8 +1,11 @@
 package observability
 
 import (
+	"net/http"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // ============ Prometheus 指标（云原生监控） ============
@@ -122,4 +125,11 @@ func IncToolCall(toolName string, success bool) {
 // IncMQMessage 便捷打点：MQ 消息处理数（queue / 状态）。
 func IncMQMessage(queue, status string) {
 	MQMessagesTotal.With(prometheus.Labels{"queue": queue, "status": status}).Inc()
+}
+
+// MetricsHandler 返回暴露 /metrics 的 HTTP handler（Prometheus 标准文本格式）。
+// 用默认注册表（prometheus.DefaultGatherer）收集全部已注册指标。
+// 建议部署到**独立监听端口/路由**（内网访问），不要挂在公网业务接口上。
+func MetricsHandler() http.Handler {
+	return promhttp.Handler()
 }
