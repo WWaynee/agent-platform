@@ -44,5 +44,11 @@ func UpdateToolEnabled(ctx context.Context, tenantID uint64, toolName string, is
 	if err := storage.UpdateToolConfig(ctx, tenantID, toolName, isEnable); err != nil {
 		return fmt.Errorf("更新工具配置失败: %w", err)
 	}
+	// 审计：记录修改工具配置行为（尽力而为，不影响主流程）。
+	state := "禁用"
+	if isEnable {
+		state = "启用"
+	}
+	RecordAuditLog(ctx, "修改工具配置", fmt.Sprintf("设置工具 %q 为%s", toolName, state))
 	return nil
 }

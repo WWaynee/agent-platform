@@ -408,7 +408,7 @@
 - [x] 核心指标埋点：请求量(HTTP 中间件)、LLM 调用次数/token、工具调用、MQ 消息处理
 - [x] Prometheus 指标独立内网端口暴露（服务端 `METRICS_PORT`，默认 9090，0=禁用；/metrics 不走公网业务中间件）
 - [x] /health 详细健康检查（检查 MySQL/Redis/MinIO/Qdrant/RabbitMQ 五个依赖，返回各组件状态，异常返回 503，适配探针语义）
-- [ ] 审计日志写入
+- [x] 审计日志写入（audit_log 表：RecordAuditLog 工具函数 + 上传文档/删除文档/修改工具配置/登录 4 处埋点）
 - [x] 测试：一条请求全链路 TraceID 一致（详见本日"遇到的问题与解决方案"）
 - [x] 测试：Prometheus 能采集到指标（/metrics 返回标准文本格式 + 打点后计数变化）
 - [x] 测试：健康检查各组件 up/down、异常时 HTTP 503、JSON 结构（status + components map + errors）
@@ -444,6 +444,13 @@
 
 8. **健康检查返回值结构要方便探针/前端解析**：若 components 值用嵌套对象，探针脚本和前端都要多一层解析。
    → `components` 值统一为字符串 `"up"/"down"`（可直接判断），down 组件的具体错误信息放在独立的 `errors` map（仅 down 时存在、`omitempty` 省略），一个 JSON 里兼顾"简单判断"与"详细排查"。
+
+9. **审计日志（audit_log 表）**：SaaS 平台关键操作要有据可查，体现审计能力。
+   → 周一设计的 7 张表里已有 `audit_logs`（`tenant_id/user_id/operation/trace_id/content`），确认迁移已在 `AllModels` 里并执行过（MySQL 实测 `SHOW TABLES` 存在）。
+   → 新增 `api/service/audit.go` 的 **`RecordAuditLog(ctx, operation, content)`** 工具函数：内部用 `interfaces.TenantIDFromCtx/UserIDFromCtx/TraceIDFromCtx` 统一从 ctx 提租户/用户/链路 ID，写入 `audit_logs`（写库走新增 `storage/audit.go` 的 `CreateAuditLog`）。**审计是"尽力而为"**：写库失败只打 warn、绝不阻断主业务。
+   → 在 4 处关键操作成功后调用：上传文档、删除文档、修改工具配置、登录。
+   → ⚠️ **登录的特殊处理**：登录是公开接口，调用时 ctx 里还没有 `user_id`（未鉴权），故先 `WithTenantUser(ctx, user.TenantID, user.ID)` 把操作者补进 ctx 再记录，否则审计日志拿不到"谁登录了"。
+   → 自测：单元测试（`api/service/audit_test.go`，连真实 MySQL 集成验证 tenant/user/trace 落库）；端到端冒烟（启动服务→登录→查表，确认 `operation='登录'`、`user_id=36`、`trace_id` 正确）。
 
 #### 周五・全链路联调 & 异常测试
 
@@ -485,7 +492,7 @@
 | 向量库 | Qdrant |
 | 消息队列 | RabbitMQ |
 | 监控 | Prometheus（observability/metrics.go，独立内网端口 /metrics，指标：HTTP/LLM/工具/MQ）|
-| 可观测 | 结构化 JSON 日志（observability，JSON 采集器可直接对接）+ 全链路 TraceID + 详细 /health 健康检查 |
+| 可观测 | 结构化 JSON 日志（observability，JSON 采集器可直接对接）+ 全链路 TraceID + 详细 /health 健康检查 + 操作审计日志（audit_logs 表）|
 | 大模型 | DeepSeek 对话（OpenAI 兼容）；向量走硅基流动（SiliconFlow）|
 | 部署 | Docker Compose |
 
@@ -571,7 +578,8 @@ agent-platform/
 │   │   ├── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
 │   │   ├── usage.go           #   Token 用量统计业务：实现 llmclient.UsageReporter 钩子（从 ctx 取租户/用户→Redis 累加）+ 当天/历史查询
 │   │   ├── quota.go           #   租户 Token 配额校验：CheckTenantTokenQuota（读 QuotaLlmToken + 当月 Redis 用量对比）
-│   │   └── health.go          #   依赖健康检查：CheckMySQL/Redis/MinIO/Qdrant/RabbitMQ（各带超时）+ CheckAll 聚合(任一 down→unhealthy)
+│   │   ├── health.go          #   依赖健康检查：CheckMySQL/Redis/MinIO/Qdrant/RabbitMQ（各带超时）+ CheckAll 聚合(任一 down→unhealthy)
+│   │   └── audit.go           #   审计日志 RecordAuditLog(ctx,operation,content)：从 ctx 提 tenant/user/trace_id 写 audit_logs（尽力而为，失败只 warn）
 │   ├── middleware/            #   中间件：trace(生成/透传trace_id) / recovery / logger(结构化带trace) / cors
 │   │                          #   / JWT / admin / context / ratelimit(限流) / quota(配额)
 │   ├── response/              #   统一返回格式与错误码工具
@@ -591,6 +599,7 @@ agent-platform/
 │   ├── session.go             #   会话 CRUD：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,更新时间倒序) / DeleteSession(软删)
 │   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / UpdateTaskRetry / GetTaskByID / ListTasks(分页)
 │   ├── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / ListToolConfigs / UpdateToolConfig / InitDefaultToolConfigs）
+│   ├── audit.go               #   审计日志存储：CreateAuditLog（写 audit_logs 表，FromCtx 取上下文）
 │   └── ratelimit.go / usage.go#   Redis 限流与用量统计存储：AllowRequest(滑动窗口 Lua) + AddUsage/GetDayUsage/GetMonthUsage/GetRangeUsage
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
@@ -770,8 +779,8 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
 ### 🟢 功能补充（时间充裕再加）
 
 10. **操作审计日志**
-    - 现状：关键操作（创建租户、删除文档、登录等）未记审计日志
-    - 后续：写入 `audit_log` 表，体现 SaaS 平台必备审计能力
+    - 现状：**已落地** ✅ — `audit_logs` 表建好；`api/service/audit.go` 的 `RecordAuditLog` 工具函数已写 UploadDocument(上传/删除文档)、`UpdateToolEnabled`(修改工具配置)、`Login`(登录) 4 处埋点，记录 operation/content + 从 ctx 提取 tenant_id/user_id/trace_id 落表
+    - 后续：可增至更多操作（创建租户、删除会话、用量查询等）；并提供管理端审计日志查询接口
 
 11. **租户状态未拦截**
     - 现状：租户被禁用后，用户可能仍能登录
@@ -788,5 +797,5 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
 | 🔴 最高 | **`tenant_id` 全部从 JWT 拿，不信前端** → 多租户安全底线 |
 | 🔴 高 | 统一错误码、参数校验 → 工程化体现 |
 | 🟡 中 | 请求日志、CORS → 完善度 |
-| 🟢 低 | 刷新 token、审计日志 → 锦上添花 |
+| 🟢 低 | 刷新 token → 锦上添花（审计日志已于可观测阶段落地）|
 

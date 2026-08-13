@@ -73,6 +73,8 @@ func UploadDocument(ctx context.Context, tenantID, userID uint64, filename strin
 	}
 
 	// 6. 立即返回文档（status=pending，后台异步处理中）
+	// 审计：记录上传行为（尽力而为，不影响主流程）。
+	RecordAuditLog(ctx, "上传文档", fmt.Sprintf("上传文档 %q（%d 字节，异步解析中）", filename, size))
 	return doc, task.ID, nil
 }
 
@@ -124,5 +126,7 @@ func DeleteDocument(ctx context.Context, tenantID, id uint64) error {
 		return fmt.Errorf("删除文档记录失败: %w", err)
 	}
 
+	// 审计：记录删除行为（尽力而为，不影响主流程）。
+	RecordAuditLog(ctx, "删除文档", fmt.Sprintf("删除文档 %q（ID=%d）", doc.Name, doc.ID))
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"agent-platform/agent/interfaces"
 	"agent-platform/storage"
 	"agent-platform/storage/model"
 	"agent-platform/util"
@@ -77,5 +78,7 @@ func Login(ctx context.Context, tenantID uint64, username, password string) (*mo
 	}
 
 	// 3. 密码正确，返回用户
+	// 审计：登录是公开接口，登录前 ctx 还没有 user_id（未鉴权），故用查到的 user 补齐租户/用户再记录。
+	RecordAuditLog(interfaces.WithTenantUser(ctx, user.TenantID, user.ID), "登录", fmt.Sprintf("用户 %q 登录成功", user.Username))
 	return user, nil
 }
