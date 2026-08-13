@@ -104,9 +104,13 @@ func GetDocumentDetail(ctx context.Context, tenantID, id uint64) (*model.Documen
 
 // DeleteDocument 删除文档
 // ctx 携带请求级 trace_id/tenant_id，透传给 storage。
-// 流程：确认文档属于当前租户 → 删 MinIO 文件 → 软删数据库记录
+// 流程：确认文档属于当前租户 → 校验拥有权（仅上传者可删）→ 删 MinIO 文件 → 软删数据库记录
 // 只删 DB 记录而保留 MinIO 文件会造成孤儿文件、浪费存储，故两者一起删。
-func DeleteDocument(ctx context.Context, tenantID, id uint64) error {
+//
+// ⚠️ 用户级隔离：文档也像会话一样按上传者隔离——只有上传该文档的用户（userID 匹配）
+//
+//	才能删除它。成员不能删他人（含管理员）上传的文档，防止越权破坏他人/公共知识库内容。
+func DeleteDocument(ctx context.Context, tenantID, userID, id uint64) error {
 	// 1. 先查文档，确认存在且属于当前租户（带 tenant_id 过滤）
 	doc, err := storage.GetDocumentByID(ctx, tenantID, id)
 	if err != nil {
@@ -116,12 +120,23 @@ func DeleteDocument(ctx context.Context, tenantID, id uint64) error {
 		return fmt.Errorf("查询文档失败: %w", err)
 	}
 
-	// 2. 删除 MinIO 里的实际文件
+	// 2. 用户级隔离：只能删自己上传的文档（同租户内也不能删别人的）
+	if doc.UserID != userID {
+		return fmt.Errorf("无权删除他人文档")
+	}
+
+	// 3. 删除 MinIO 里的实际文件
 	if err := storage.DeleteFile(doc.MinioObjectKey); err != nil {
 		return fmt.Errorf("删除 MinIO 文件失败: %w", err)
 	}
 
-	// 3. 软删数据库记录
+	// 3.5 删除该文档在 Qdrant 里的全部向量（数据一致性：文档删了，向量不能留孤儿）
+	//     Qdrant 不可用时不能静默吞掉，否则留下脏向量；报错交给上层处理。
+	if err := storage.DeleteVectorsByDocument(ctx, tenantID, id); err != nil {
+		return fmt.Errorf("删除文档向量失败: %w", err)
+	}
+
+	// 4. 软删数据库记录
 	if err := storage.DeleteDocument(ctx, tenantID, id); err != nil {
 		return fmt.Errorf("删除文档记录失败: %w", err)
 	}

@@ -151,8 +151,9 @@ func DeleteDocument(c *gin.Context) {
 	}
 
 	tenantID := middleware.GetTenantID(c)
-	if err := service.DeleteDocument(c.Request.Context(), tenantID, id); err != nil {
-		// 文档不存在/跨租户访问统一返回 400
+	userID := middleware.GetUserID(c)
+	if err := service.DeleteDocument(c.Request.Context(), tenantID, userID, id); err != nil {
+		// 文档不存在 / 跨租户 / 非本人文档 统一返回 400（含"无权删除他人文档"）
 		response.BadRequest(c, err.Error())
 		return
 	}

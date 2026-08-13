@@ -259,6 +259,48 @@ func DeleteVectorByID(ctx context.Context, id uint64) error {
 	return nil
 }
 
+// DeleteVectorsByDocument 按文档删除其全部向量点（数据一致性关键）。
+// 通过 filter 同时限定 tenant_id + document_id 删除：
+//   - tenant_id 过滤：只删当前租户的，避免越权删到别的租户向量；
+//   - document_id 过滤：只删该文档的全部切片向量，而非整个租户。
+//
+// 用途：删除文档时连带清理 Qdrant 里的该文档向量，防止"文档删了、向量还在"的
+// 孤儿向量（孤儿向量会让 RAG 检索命中已删除文档的片段，即脏数据）。
+func DeleteVectorsByDocument(ctx context.Context, tenantID, documentID uint64) error {
+	collection := config.GlobalConfig.Qdrant.CollectionName
+	filter := &qdrant.Filter{
+		Must: []*qdrant.Condition{
+			{
+				ConditionOneOf: &qdrant.Condition_Field{Field: &qdrant.FieldCondition{
+					Key: "tenant_id",
+					Match: &qdrant.Match{
+						MatchValue: &qdrant.Match_Integer{Integer: int64(tenantID)},
+					},
+				}},
+			},
+			{
+				ConditionOneOf: &qdrant.Condition_Field{Field: &qdrant.FieldCondition{
+					Key: "document_id",
+					Match: &qdrant.Match{
+						MatchValue: &qdrant.Match_Integer{Integer: int64(documentID)},
+					},
+				}},
+			},
+		},
+	}
+
+	wait := true
+	_, err := QdrantClient.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: collection,
+		Wait:           &wait,
+		Points:         qdrant.NewPointsSelectorFilter(filter),
+	})
+	if err != nil {
+		return fmt.Errorf("按文档删除向量失败(document=%d): %w", documentID, err)
+	}
+	return nil
+}
+
 // structToMap 把 Qdrant 返回的 payload（map[string]*Value）转成普通 map[string]interface{}。
 // 供上层直接读取字段（如 text、document_id）。
 func structToMap(payload map[string]*qdrant.Value) map[string]interface{} {
