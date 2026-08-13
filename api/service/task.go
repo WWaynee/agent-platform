@@ -121,3 +121,14 @@ func GetTaskDetail(ctx context.Context, tenantID, id uint64) (*model.AgentTask, 
 	}
 	return task, nil
 }
+
+// GetTaskList 分页查询当前租户的任务列表（管理员视角）。
+// 强制按 tenant_id 过滤，只能看到本租户的任务，绝不跨租户。
+// 返回该页任务切片、总条数与可能的错误。
+func GetTaskList(ctx context.Context, tenantID uint64, page, pageSize int) ([]model.AgentTask, int64, error) {
+	list, total, err := storage.ListTasks(ctx, tenantID, page, pageSize)
+	if err != nil {
+		return nil, 0, fmt.Errorf("查询任务列表失败: %w", err)
+	}
+	return list, total, nil
+}
