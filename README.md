@@ -75,7 +75,7 @@
 - [x] 文档元信息写入 document 表（含 user_id 上传者，status 先置 pending）
 - [x] 实现文档列表查询接口（GET /api/document/list，分页）
 - [x] 实现文档详情接口（GET /api/document/:id）
-- [x] 实现文档删除接口（DELETE /api/document/:id，MinIO + DB 同步删）
+- [x] 实现文档删除接口（DELETE /api/document/:id，MinIO + DB 同步删，**仅上传者可删的用户级隔离**）
 - [x] 测试：上传文件，MinIO 有文件，DB 有记录
 - [x] 测试：只能查当前租户的文档（多租户隔离）
 - [x] 测试：租户 B 看不到 / 删不掉租户 A 的文档
@@ -101,6 +101,8 @@
 
 6. **删除需 MySQL 与 MinIO 双删**：只删 DB 记录而保留 MinIO 文件会形成孤儿文件、浪费存储。
    → 修复：`service.DeleteDocument` 先查归属（带租户过滤）→ `DeleteFile` 删 MinIO 实际文件 → 软删 DB 记录，两处数据保持一致。
+7. **文档删除的用户级隔离**：多租户隔离只挡「跨租户」，不挡「同租户不同用户」——成员原可删管理员上传的同租户文档。
+   → 与既有的会话隔离保持一致：`service.DeleteDocument` 增加 `userID` 参数，校验 `doc.UserID == userID`，否则返回"无权删除他人文档"。成员仅能删自己上传的文档，越权（含删 admin 文档）被拦截。
 
 #### 周四・LLM 客户端封装
 
@@ -408,7 +410,7 @@
 - [x] 核心指标埋点：请求量(HTTP 中间件)、LLM 调用次数/token、工具调用、MQ 消息处理
 - [x] Prometheus 指标独立内网端口暴露（服务端 `METRICS_PORT`，默认 9090，0=禁用；/metrics 不走公网业务中间件）
 - [x] /health 详细健康检查（检查 MySQL/Redis/MinIO/Qdrant/RabbitMQ 五个依赖，返回各组件状态，异常返回 503，适配探针语义）
-- [x] 审计日志写入（audit_log 表：RecordAuditLog 工具函数 + 上传文档/删除文档/修改工具配置/登录 4 处埋点）
+- [x] 审计日志写入（audit_log 表：RecordAuditLog 工具函数 + 上传文档/删除文档/修改工具配置/登录/创建会话/RAG问答 6 处埋点）
 - [x] 测试：一条请求全链路 TraceID 一致（详见本日"遇到的问题与解决方案"）
 - [x] 测试：Prometheus 能采集到指标（/metrics 返回标准文本格式 + 打点后计数变化）
 - [x] 测试：健康检查各组件 up/down、异常时 HTTP 503、JSON 结构（status + components map + errors）
@@ -448,7 +450,7 @@
 9. **审计日志（audit_log 表）**：SaaS 平台关键操作要有据可查，体现审计能力。
    → 周一设计的 7 张表里已有 `audit_logs`（`tenant_id/user_id/operation/trace_id/content`），确认迁移已在 `AllModels` 里并执行过（MySQL 实测 `SHOW TABLES` 存在）。
    → 新增 `api/service/audit.go` 的 **`RecordAuditLog(ctx, operation, content)`** 工具函数：内部用 `interfaces.TenantIDFromCtx/UserIDFromCtx/TraceIDFromCtx` 统一从 ctx 提租户/用户/链路 ID，写入 `audit_logs`（写库走新增 `storage/audit.go` 的 `CreateAuditLog`）。**审计是"尽力而为"**：写库失败只打 warn、绝不阻断主业务。
-   → 在 4 处关键操作成功后调用：上传文档、删除文档、修改工具配置、登录。
+   → 在关键操作成功后调用：上传文档、删除文档、修改工具配置、登录、创建会话、RAG问答。
    → ⚠️ **登录的特殊处理**：登录是公开接口，调用时 ctx 里还没有 `user_id`（未鉴权），故先 `WithTenantUser(ctx, user.TenantID, user.ID)` 把操作者补进 ctx 再记录，否则审计日志拿不到"谁登录了"。
    → 自测：单元测试（`api/service/audit_test.go`，连真实 MySQL 集成验证 tenant/user/trace 落库）；端到端冒烟（启动服务→登录→查表，确认 `operation='登录'`、`user_id=36`、`trace_id` 正确）。
 
@@ -571,7 +573,7 @@ agent-platform/
 │   │   ├── document_parse.go  #   文档文本切分 SplitText + 读取 ReadTextDocument
 │   │   │                      #   + 向量化主流程 ProcessDocument（切片→Embedding→写Qdrant）
 │   │   ├── task.go            #   异步任务消费编排 ConsumeDocumentParseTask（任务+文档状态流转、重试计数、
-│   │   │                      #   幂等短路） + 任务详情查询 GetTaskDetail
+│   │   │                      #   幂等短路） + 任务详情查询 GetTaskDetail + 任务列表 GetTaskList(分页, 管理员)
 │   │   ├── knowledge.go       #   知识库语义检索 Search（query转向量→storage.SearchVectors按租户过滤）
 │   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单：显式关闭即拒，查不到默认放行）
 │   │   ├── tool_admin.go      #   工具开关配置（租户管理）：GetToolEnabled / UpdateToolEnabled（查不到默认启用）
@@ -779,8 +781,9 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
 ### 🟢 功能补充（时间充裕再加）
 
 10. **操作审计日志**
-    - 现状：**已落地** ✅ — `audit_logs` 表建好；`api/service/audit.go` 的 `RecordAuditLog` 工具函数已写 UploadDocument(上传/删除文档)、`UpdateToolEnabled`(修改工具配置)、`Login`(登录) 4 处埋点，记录 operation/content + 从 ctx 提取 tenant_id/user_id/trace_id 落表
-    - 后续：可增至更多操作（创建租户、删除会话、用量查询等）；并提供管理端审计日志查询接口
+    - 现状：**已落地** ✅ — `audit_logs` 表建好；`api/service/audit.go` 的 `RecordAuditLog` 工具函数已写 UploadDocument(上传/删除文档)、`UpdateToolEnabled`(修改工具配置)、`Login`(登录)、`CreateSession`(创建会话)、`Chat`(RAG问答) 6 处埋点，记录 operation/content + 从 ctx 提取 tenant_id/user_id/trace_id 落表
+    - 单测：`api/service/session_test.go` 的 `TestCreateSessionAudit`（连真实 MySQL，验证创建会话埋点 tenant/user/trace 落库）+ 端到端脚本 `scripts/e2e_user_journey.sh` 第 11 步覆盖 登录/上传文档/创建会话/RAG问答 四类审计，并校验 RAG 问答 content 记录了命中工具
+    - 后续：可再增至更多操作（创建租户、删除会话、用量查询等）；并提供管理端审计日志查询接口
 
 11. **租户状态未拦截**
     - 现状：租户被禁用后，用户可能仍能登录
