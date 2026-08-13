@@ -39,6 +39,10 @@ func CreateSession(ctx context.Context, tenantID, userID uint64, title string) (
 	if err := storage.CreateSession(ctx, s); err != nil {
 		return 0, fmt.Errorf("创建会话失败: %w", err)
 	}
+
+	// 审计：记录创建会话行为（尽力而为，不影响主流程）。
+	// ctx 已由 JWT 中间件种入 tenant_id/user_id/trace_id，RecordAuditLog 会一并落库。
+	RecordAuditLog(ctx, "创建会话", fmt.Sprintf("新建会话 %q（ID=%d）", title, s.ID))
 	return s.ID, nil
 }
 

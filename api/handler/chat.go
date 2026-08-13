@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -128,6 +129,14 @@ func Chat(c *gin.Context) {
 	for _, tc := range resp.ToolCalls {
 		toolNames = append(toolNames, tc.ToolName)
 	}
+
+	// 审计：记录一次 RAG 问答（尽力而为，不影响主流程）。
+	// ctx 已由 JWT 中间件种入 tenant_id/user_id/trace_id，RecordAuditLog 会一并落库。
+	// 内容记录会话 ID、问题与命中的工具，便于回溯"谁在哪个会话问了什么、走了什么工具"。
+	handleMsg := req.Query
+	service.RecordAuditLog(c.Request.Context(), "RAG问答",
+		fmt.Sprintf("会话 %s 提问 %q（命中工具: %v）", sessionID, handleMsg, toolNames))
+
 	response.Success(c, gin.H{
 		"answer":     resp.Answer,
 		"session_id": sessionID,
