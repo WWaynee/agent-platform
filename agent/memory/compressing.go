@@ -75,28 +75,38 @@ func (c *CompressingMemory) AddMessage(tenantID uint64, sessionID string, msg Ch
 	}
 }
 
-// shouldCompress 判断该会话历史是否需要压缩：超阈值 且 非重复压缩（首条不是 system 摘要）。
+// shouldCompress 判断该会话历史是否需要压缩：token 超过阈值即压缩。
+//
+// ⚠️ 不判断"历史首条是不是 system 摘要"：
+//   - 一旦超长就压缩，把旧历史（含之前的 system 摘要）折叠成更新的摘要并保留最近几轮；
+//   - 旧的"首条为 system 则不压缩"防套娃策略，会导致首次压缩后历史一直以 system 开头、
+//     之后永不再压缩、历史无限膨胀直至撑爆 LLM 上下文窗口（bug：自测点"token 不超限"不成立）；
+//   - 改为"超长即压缩"，摘要随新旧对话持续更新：既有压缩跨度（保留区）避免频繁磨平，
+//     又保证历史 token 始终维持在阈值附近、永不撑爆上下文。
 func (c *CompressingMemory) shouldCompress(tenantID uint64, sessionID string) bool {
 	hist := c.base.GetHistory(tenantID, sessionID)
 	if len(hist) == 0 {
-		return false
-	}
-	// 历史首条是 system 摘要 → 刚压缩过，不套娃
-	if hist[0].Role == RoleSystem {
 		return false
 	}
 	return countHistoryTokens(hist) > CompressThresholdTokens
 }
 
 // compress 执行压缩：拆新旧 → 生成摘要 → 组装 → 写回底层。
+//
+// 兼容"首条已是 system 摘要（二次及以上压缩）"的情况：旧的 system 摘要会随其后的旧消息
+// 一起被折叠进更新的摘要（损失的是旧的模糊摘要，换取 token 显著回落），并保留最近几轮原文。
+// 由此，多轮"超长→压缩"循环下历史 token 始终能回落到阈值附近而不失控。
 func (c *CompressingMemory) compress(tenantID uint64, sessionID string) {
 	hist := c.base.GetHistory(tenantID, sessionID)
 
 	split := compSplitKeepRecent(hist, compKeepRecentRounds)
 	oldPart := hist[:split]
 	recent := hist[split:]
+
 	if len(oldPart) == 0 {
-		return // 无可压缩的旧消息
+		// 无可压缩的旧消息（历史还不足一拍"最近几轮"可拆分，或全部在保留区内）。
+		// 此时不硬压、保留最近几轮原文（避免丢上下文）；待历史继续增长到足以拆分时再压缩。
+		return
 	}
 
 	summary := "（早期对话因篇幅过长已折叠，重要背景如下）"

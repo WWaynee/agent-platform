@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"agent-platform/agent/memory"
 	"agent-platform/agent/toolmanager"
@@ -44,6 +45,8 @@ const (
 	finalAnswerAction = "final_answer"
 	// maxParseRetries LLM 输出解析失败时的最大重试次数（防止无限重试）。
 	maxParseRetries = 1
+	// defaultToolTimeout 单次工具执行的默认超时上限（10s），防止坏工具无限等待/拖死整轮。
+	defaultToolTimeout = 10 * time.Second
 )
 
 // ReActEngine 是 ReAct（Reason + Act）调度引擎的主结构体。
@@ -68,6 +71,10 @@ type ReActEngine struct {
 	MaxIterations int
 	// SystemPrompt 系统提示词模板，定义 Agent 的角色与行为准则。
 	SystemPrompt string
+	// ToolTimeout 单次工具执行的超时上限（默认 10s）。
+	// 超时会以「带 deadline 的运行时 ctx」注入工具（经 AgentContext.ToContext 下传），
+	// 工具引擎据此监听 ctx.Done() 中止耗时操作，避免单个坏工具把整轮回复拖死/无限等待。
+	ToolTimeout time.Duration
 }
 
 // NewReActEngine 构造一个 ReAct 引擎。
@@ -95,6 +102,7 @@ func NewReActEngine(llm LLMClient, tools *toolmanager.ToolManager, mem memory.Me
 		Memory:        mem,
 		MaxIterations: 5, // 默认 5 次迭代上限
 		SystemPrompt:  systemPrompt,
+		ToolTimeout:   defaultToolTimeout, // 默认单次工具超时
 	}
 }
 
@@ -167,7 +175,18 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 
 		// f/g. 工具调用：记录审计 + 经 ToolManager 统一执行（含租户权限校验）
 		calls = append(calls, ToolCall{ToolName: parsed.Action, Params: rawInputToParams(parsed.Input)})
-		out, terr := e.ToolManager.ExecuteTool(ctx, parsed.Action, parsed.Input)
+
+		// 工具执行超时保护：为本次调用注入「带 deadline 的运行时 ctx」。
+		// 以携带 tenant/user/trace_id 的基准 ctx 派生，经 AgentContext.WithRuntimeContext
+		// 交给工具（工具内每次 ctx.ToContext(nil) 都会拿到带超时的 ctx），
+		// 工具据此 select ctx.Done() 中止耗时操作——避免单个坏工具拖死整轮、无限等待。
+		toolCtx := ctx.ToContext(nil) // 基准：带上租户/用户/trace_id
+		if e.ToolTimeout > 0 {
+			cctx, cancel := context.WithTimeout(toolCtx, e.ToolTimeout)
+			toolCtx = cctx
+			defer cancel()
+		}
+		out, terr := e.ToolManager.ExecuteTool(*(ctx.WithRuntimeContext(toolCtx)), parsed.Action, parsed.Input)
 		if terr != nil {
 			out = fmt.Sprintf("工具 %q 执行失败: %v", parsed.Action, terr)
 		}

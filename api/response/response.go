@@ -4,6 +4,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
+	"agent-platform/observability"
 )
 
 // ============ 常用错误码常量 ============
@@ -49,7 +52,17 @@ func SuccessMessage(c *gin.Context, message string, data interface{}) {
 }
 
 // Fail 失败返回，code 非 0，HTTP 状态码固定为 200（业务错误由 code 区分）
+// ⚠️ 服务内部错误（500）在此统一打一条 error 日志（带 trace_id/path），
+//
+//	确保 MinIO/Qdrant 等依赖故障在 HTTP 出口也留痕（依赖故障容错自测点：有详细错误日志）。
 func Fail(c *gin.Context, code int, message string) {
+	if code == CodeServerError {
+		logger := observability.WithContext(c.Request.Context())
+		logger.Error("请求处理失败",
+			zap.String("path", c.FullPath()),
+			zap.String("method", c.Request.Method),
+			zap.String("error", message))
+	}
 	c.JSON(http.StatusOK, Body{
 		Code:    code,
 		Message: message,

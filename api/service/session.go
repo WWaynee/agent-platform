@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -97,4 +98,51 @@ func DeleteSession(ctx context.Context, tenantID, userID, id uint64) error {
 	}
 
 	return nil
+}
+
+// GetSessionMessages 查询某会话的对话历史消息。
+// ctx 携带请求级 trace_id/tenant_id，透传给 storage/Redis。
+//
+// 多租户/多用户越权防护（先归属后取数）：
+//  1. `storage.GetSessionByID(ctx, tenantID, id)`：带租户过滤查询，不存在/属于别的租户
+//     统一返回 `gorm.ErrRecordNotFound`（不区分"不存在"与"无权"→ 防横向探测）；
+//  2. `s.UserID != userID` 再次校验当前用户是否本人，跨用户一律拒绝；
+//     即使租户 B 拿租户 A 的会话 ID 来查，也在这两步被挡回 → "越权查会话"自测点成立。
+//
+// 三条路径的返回：
+//   - 会话不存在 / 越权 → 返回非 nil error（统一由 handler 转 "无权访问"）；
+//   - Redis 未初始化 → 返回空切片（视为无历史）；
+//   - 正常 → 返回该会话的消息列表（每条含 role/content，正序）。
+func GetSessionMessages(ctx context.Context, tenantID, userID, id uint64) ([]map[string]any, error) {
+	// 1. 归属校验（带租户过滤 + 本人校验）
+	s, err := storage.GetSessionByID(ctx, tenantID, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("会话不存在")
+		}
+		return nil, fmt.Errorf("查询会话失败: %w", err)
+	}
+	if s.UserID != userID {
+		return nil, fmt.Errorf("无权访问他人会话")
+	}
+
+	// 2. 从 Redis 读该租户该会话的消息历史（key 与 engine 的 RedisMemory 一致）
+	if storage.RDB == nil {
+		return []map[string]any{}, nil
+	}
+	vals, err := storage.RDB.LRange(ctx, sessionRedisKey(tenantID, s.ID), 0, -1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("读取会话消息失败: %w", err)
+	}
+
+	// 3. 反序列化每条消息（坏的跳过，不因单条损坏影响整体）
+	out := make([]map[string]any, 0, len(vals))
+	for _, v := range vals {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(v), &m); err != nil {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }

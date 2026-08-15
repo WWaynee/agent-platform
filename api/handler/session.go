@@ -116,3 +116,30 @@ func DeleteSession(c *gin.Context) {
 
 	response.Success(c, nil)
 }
+
+// GetSessionMessages 查询某会话的对话历史
+// GET /api/session/:id/messages
+// 校验该会话属于当前租户且属于当前用户，才从 Redis 读回其消息历史返回。
+// 越权访问（他租户/他人会话）统一返回"会话不存在或无权访问"，不泄露任何内容。
+func GetSessionMessages(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "无效的会话 ID")
+		return
+	}
+
+	tenantID := middleware.GetTenantID(c)
+	userID := middleware.GetUserID(c)
+
+	msgs, err := service.GetSessionMessages(c.Request.Context(), tenantID, userID, id)
+	if err != nil {
+		// 会话不存在 / 跨租户 / 无权访问他人会话：统一回"无权访问"，防横向探测
+		response.Forbidden(c, "会话不存在或无权访问")
+		return
+	}
+
+	response.Success(c, gin.H{
+		"session_id": id,
+		"messages":   msgs,
+	})
+}

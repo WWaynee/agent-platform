@@ -16,6 +16,33 @@ type AgentContext struct {
 
 	// meta 通用透传容器：存放其他需要沿调用链下传的信息（如 TraceID、超时、配额等）。
 	meta map[string]any
+
+	// rctx 运行时标准上下文：可选承载 deadline / cancellation（如工具执行超时）。
+	// 为 nil 时按原逻辑在 ToContext 里新建；工具可通过 ctx.ToContext(nil) 拿到带
+	// deadline 的 ctx 感知超时，避免因 AgentContext 不承载标准 ctx 而无法实现工具超时控制。
+	rctx context.Context
+}
+
+// WithRuntimeContext 注入一个"运行时标准 ctx"，可承载 deadline / cancellation。
+// 后续调用 ToContext 时会优先以它为基准（而非新建空白 ctx），使超时/取消信号能沿
+// LLM/工具等下游调用链下传。返回同实例（链式可用）。
+func (c *AgentContext) WithRuntimeContext(ctx context.Context) *AgentContext {
+	if ctx != nil {
+		c.rctx = ctx
+	}
+	return c
+}
+
+// RuntimeContext 返回此前注入的运行时标准 ctx；未注入时返回 nil。
+// 工具/引擎内部如需读取 deadline 或监听取消，可基于它派生：
+//
+//	rctx := ctx.RuntimeContext()
+//	if rctx == nil { /* 无超时约束 */ }
+func (c *AgentContext) RuntimeContext() context.Context {
+	if c == nil {
+		return nil
+	}
+	return c.rctx
 }
 
 // 元信息中 trace_id 使用的规范 key（与 context.go 的 ctxKeyTraceID 对应，经 ToContext 写入 ctx）。
@@ -45,7 +72,11 @@ func (c *AgentContext) TraceID() string {
 // 链路信息翻译成 context 值，使 trace_id / tenant_id / user_id 能经 observability.WithContext
 // 自动进入日志。避免"新建 context 把 trace_id 弄丢"。
 func (c *AgentContext) ToContext(base context.Context) context.Context {
-	if base == nil {
+	// 优先以注入的运行时 ctx 为基准（可携带 deadline/cancellation，如工具执行超时），
+	// 保留其超时语义；未注入时退回默认（新背景 ctx 或调用方传入的 base）。
+	if c.rctx != nil {
+		base = c.rctx
+	} else if base == nil {
 		base = context.Background()
 	}
 	ctx := WithTenantUser(base, c.TenantID, c.UserID)

@@ -174,3 +174,45 @@ func TestCompressingMemory_TransparentToList(t *testing.T) {
 		t.Fatalf("Clear 未透传")
 	}
 }
+
+// TestCompressingMemory_RecompressAfterSystem
+// 回归测试（本次修复）：旧逻辑"历史首条是 system 摘要 → 不压缩"导致首次压缩后
+// 历史以 system 打头、之后永不再压缩、token 无限膨胀直至撑爆上下文窗口。
+// 本用例手工构造一条"首条已是 system 摘要且整体超长"的历史，验证仍会触发压缩、
+// token 回落到阈值内——证明系统摘要后也能持续多次压缩。
+func TestCompressingMemory_RecompressAfterSystem(t *testing.T) {
+	sum := &stubSummarizer{reply: "摘要：围绕数据平台与多租户权限治理持续演进。"}
+	base := NewInMemoryMemory()
+	cm := NewCompressingMemory(base, sum)
+
+	// 直接往底层塞入"首条 system 摘要 + 大量旧消息 + 最近 3 轮短消息"，
+	// 模拟一个初次压缩后、又累计了海量新对话的历史（历史首条仍是 system）。
+	base.AddMessage(1, "s", ChatMessage{Role: RoleSystem, Content: "对话历史摘要：早期背景已折叠。"})
+	long := strings.Repeat("初次压缩之后又累积的大量长对话内容覆盖检索优化与指标口径", 60)
+	for i := 0; i < 12; i++ {
+		base.AddMessage(1, "s", ChatMessage{Role: RoleUser, Content: long})
+		base.AddMessage(1, "s", ChatMessage{Role: RoleAssistant, Content: long})
+	}
+	for i := 0; i < 3; i++ {
+		base.AddMessage(1, "s", ChatMessage{Role: RoleUser, Content: "最近一轮的简短问题"})
+		base.AddMessage(1, "s", ChatMessage{Role: RoleAssistant, Content: "最近一轮的简短回答"})
+	}
+
+	before := tokenCount(cm.GetHistory(1, "s"))
+	if before <= CompressThresholdTokens {
+		t.Skipf("构造的前置历史未超阈值(before=%d)，跳过", before)
+	}
+
+	// 触发一次 AddMessage → 即使首条已是 system，也应再次压缩
+	cm.AddMessage(1, "s", ChatMessage{Role: RoleUser, Content: "当前问题"})
+	hist := cm.GetHistory(1, "s")
+	after := tokenCount(hist)
+
+	// 核心验收：二次压缩发生且 token 回落到阈值附近（不再无限膨胀）
+	if after >= before {
+		t.Fatalf("首条已 system 的历史未再压缩: before=%d after=%d（历史膨胀 bug 仍存在）", before, after)
+	}
+	if after > CompressThresholdTokens {
+		t.Fatalf("二次压缩后仍超阈值: before=%d after=%d", before, after)
+	}
+}

@@ -65,9 +65,10 @@ func NewRouter() *gin.Engine {
 		private.POST("/chat", middleware.ChatRateLimiter(), middleware.QuotaInterceptor(), handler.Chat)
 
 		// 会话管理（创建/列表/删除，需登录）
-		private.POST("/session", handler.CreateSession)       // 创建会话
-		private.GET("/session/list", handler.GetSessionList)  // 会话列表（只当前用户）
-		private.DELETE("/session/:id", handler.DeleteSession) // 删除会话（只删自己的）
+		private.POST("/session", handler.CreateSession)                  // 创建会话
+		private.GET("/session/list", handler.GetSessionList)             // 会话列表（只当前用户）
+		private.GET("/session/:id/messages", handler.GetSessionMessages) // 会话历史（只当前用户的会话；他租户/他人会话→无权）
+		private.DELETE("/session/:id", handler.DeleteSession)            // 删除会话（只删自己的）
 
 		// 租户查询/创建（需登录）
 		private.POST("/tenant", handler.CreateTenant)       // 创建租户

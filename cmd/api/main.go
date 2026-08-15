@@ -19,6 +19,8 @@ import (
 	"agent-platform/observability"
 	"agent-platform/storage"
 	"agent-platform/toolkit"
+
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -28,6 +30,15 @@ func main() {
 	}
 	cfg := config.GlobalConfig
 	log.Println("✅ 配置加载完成")
+
+	// 1.5 初始化结构化 JSON 日志（读 LOG_LEVEL / LOG_FILE），退出前刷新缓冲。
+	//     ⚠️ 必须在中间件/各层用 observability.WithContext 之前初始化，
+	//     否则全局 logger 为 nop，所有请求级结构化日志（错误/trace_id 关联）会被静默丢弃。
+	obsFlush := observability.Init()
+	defer obsFlush()
+	observability.Info("配置加载完成",
+		zap.String("log_level", cfg.Log.Level),
+		zap.String("log_file", cfg.Log.File))
 
 	// 2. 初始化 MySQL 连接（从 config 读取配置）
 	if err := storage.InitMySQL(); err != nil {
