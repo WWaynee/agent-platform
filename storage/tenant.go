@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 
+	"gorm.io/gorm"
+
 	"agent-platform/storage/model"
 )
 
@@ -16,6 +18,12 @@ import (
 // CreateTenant 插入一条租户记录
 func CreateTenant(ctx context.Context, tenant *model.Tenant) error {
 	return DB.WithContext(ctx).Create(tenant).Error
+}
+
+// CreateTenantTx 在调用方显式事务内插入一条租户记录。
+// tx 由上层 service 用 storage.DB.Transaction 包裹传入，保证与其它子步骤同事务、原子提交。
+func CreateTenantTx(ctx context.Context, tx *gorm.DB, tenant *model.Tenant) error {
+	return tx.WithContext(ctx).Create(tenant).Error
 }
 
 // GetTenantByID 根据主键 ID 查询单个租户

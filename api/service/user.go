@@ -17,19 +17,42 @@ import (
 
 // Register 用户注册
 // ctx 携带请求级 trace_id/tenant_id，透传给 storage 使 DB 日志带同一链路 ID。
-// 流程：校验用户名是否已存在 → 密码 bcrypt 哈希 → 插入数据库 → 返回用户
+//
+// 流程：① 校验租户存在 → ② 校验用户名是否已存在 → ③ 密码 bcrypt 哈希 → ④ 插入数据库 → 返回用户
 //
 // 角色规则：注册接口默认创建的是普通成员 member。只有调用方显式传 "admin" 才会创建管理员
-// （例如租户创建时由系统自动给租户建首个 admin；普通注册一律 member，防止自助注册提权）。
+// （例如租户创建时由系统自动给租户建首个 admin；普通自助注册一律 member，防止自助注册提权）。
+//
+// ⚠️ 多租户安全（对应需求单 0001）：注册是公开接口、只能靠前端自报 tenant_id，
+// 是全链路唯一信任前端自报 tenant_id 的口子。故必须校验该租户**存在**，
+// 否则匿名用户可凭空编造不存在的租户 ID 造出"无主租户孤儿账号"，绕过建租户流程。
 func Register(ctx context.Context, tenantID uint64, username, password, role string) (*model.User, error) {
-	// 1. 先查该租户下用户名是否已存在
-	_, err := storage.GetUserByUsername(ctx, tenantID, username)
-	if err == nil {
-		return nil, fmt.Errorf("用户名已存在")
+	// 0. 校验租户存在（堵"孤儿账号"）。
+	if err := ensureTenantActive(ctx, tenantID); err != nil {
+		return nil, err
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		// 不是"记录不存在"，是真实数据库错误
+
+	// 用默认连接执行注册（非事务场景：普通自助注册）。
+	return registerInTx(ctx, storage.DB, tenantID, username, password, role)
+}
+
+// registerInTx 在给定的 *gorm.DB（默认连接或事务句柄）内完成用户注册的核心逻辑：
+//
+//	查重用户名 → 密码哈希 → 创建用户。
+//
+// 抽出该内部函数供两处复用：
+//   - Register：用默认连接 storage.DB 执行（普通自助注册）；
+//   - RegisterTenant：在建租户事务内用事务句柄 tx 执行（首个 admin，与其它子步骤原子提交）。
+func registerInTx(ctx context.Context, db *gorm.DB, tenantID uint64, username, password, role string) (*model.User, error) {
+	// 1. 校验该租户外下用户名是否已存在
+	var count int64
+	if err := db.WithContext(ctx).Model(&model.User{}).
+		Where("tenant_id = ? AND username = ?", tenantID, username).
+		Count(&count).Error; err != nil {
 		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+	if count > 0 {
+		return nil, fmt.Errorf("用户名已存在")
 	}
 
 	// 2. 密码哈希
@@ -43,7 +66,7 @@ func Register(ctx context.Context, tenantID uint64, username, password, role str
 		role = "member"
 	}
 
-	// 4. 构造用户并插入
+	// 4. 构造用户并插入（用传入的 db 句柄，支持默认连接与事务句柄）
 	user := &model.User{
 		TenantID:     tenantID,
 		Username:     username,
@@ -51,17 +74,38 @@ func Register(ctx context.Context, tenantID uint64, username, password, role str
 		Role:         role,
 		Status:       1, // 默认启用
 	}
-	if err := storage.CreateUser(ctx, user); err != nil {
+	if err := storage.CreateUserTx(ctx, db, user); err != nil {
 		return nil, fmt.Errorf("创建用户失败: %w", err)
 	}
 
 	return user, nil
 }
 
+// ensureTenantActive 校验指定租户存在且启用；租户不存在或已禁用则返回明确错误。
+// 用于注册 / 登录（堵问题：孤儿账号 / 禁用租户内账号仍可登录）。
+func ensureTenantActive(ctx context.Context, tenantID uint64) error {
+	tenant, err := storage.GetTenantByID(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("租户/公司不存在")
+		}
+		return fmt.Errorf("查询租户失败: %w", err)
+	}
+	if tenant.Status != 1 {
+		return fmt.Errorf("该租户已被禁用，请联系管理员")
+	}
+	return nil
+}
+
 // Login 用户登录
 // ctx 携带请求级 trace_id/tenant_id，透传给 storage 使 DB 日志带同一链路 ID。
 // 登录请求需携带 tenant_id + username + password
 // 无论用户不存在还是密码错误，统一返回"用户名或密码错误"（安全考虑，不让攻击者探测用户名是否有效）
+//
+// ⚠️ 多租户安全（对应需求单 0001）：登录是公开接口、只能靠前端自报 tenant_id，
+// 故登录时必须校验用户所属租户**存在且启用**：
+//   - 租户不存在（孤儿账号）→ 拒绝登录；
+//   - 租户被禁用 → 拒绝登录（禁用租户内的账号不能继续登录）。
 func Login(ctx context.Context, tenantID uint64, username, password string) (*model.User, error) {
 	// 1. 按租户 + 用户名查用户
 	user, err := storage.GetUserByUsername(ctx, tenantID, username)
@@ -72,12 +116,17 @@ func Login(ctx context.Context, tenantID uint64, username, password string) (*mo
 		return nil, fmt.Errorf("查询用户失败: %w", err)
 	}
 
-	// 2. 校验密码
+	// 2. 校验租户存在且启用（堵孤儿账号 / 禁用租户登录）
+	if err := ensureTenantActive(ctx, user.TenantID); err != nil {
+		return nil, err
+	}
+
+	// 3. 校验密码
 	if !util.VerifyPassword(password, user.PasswordHash) {
 		return nil, fmt.Errorf("用户名或密码错误")
 	}
 
-	// 3. 密码正确，返回用户
+	// 4. 密码正确，返回用户
 	// 审计：登录是公开接口，登录前 ctx 还没有 user_id（未鉴权），故用查到的 user 补齐租户/用户再记录。
 	RecordAuditLog(interfaces.WithTenantUser(ctx, user.TenantID, user.ID), "登录", fmt.Sprintf("用户 %q 登录成功", user.Username))
 	return user, nil

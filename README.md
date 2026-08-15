@@ -796,27 +796,30 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
 
 > 以下均为项目当前状态下为了快速开发与方便调试**暂时留下的简化点**，需要在**第二周或面试前**补齐。粗体为优先级最高的底线项。
 
+> 🎯 **需求单 0001「用户账号体系改进」已落地**（2026-08-12）：本清单第 1、2、3、4、11 条已收敛解决，详见下方各条 ⚠️ 标注。新增**公开注册租户 `POST /api/tenant/register`**，并配套端到端脚本 `scripts/e2e_account_register.sh`（**8 项全过**：注册租户→新 admin 登录→乱填 tenant_id 注册被拒→合法租户内建 admin→重复同名用户被拒→禁用租户登录被拒→未登录访问租户列表 401→注册租户审计落库）。
+
 ### 🔴 安全相关（必须改，面试必问）
 
 1. **创建租户接口权限**
-   - 现状：创建租户已在**私有路由组**（需登录），但**任何登录用户（含普通 member）都能创建**，无超管角色限制
-   - 问题：线上环境不可能让任意登录用户随便创建租户
-   - 后续：增加 `super_admin` 超管角色，仅超管可建租户；或改成后台人工审核
+   - ⚠️ **已按需求单 0001 收敛**（2026-08-12 起）：原「任意登录用户（含 member）都能走私有 `POST /api/tenant` 建租户」的语义已废止。
+   - 现状：新增**公开 `POST /api/tenant/register`**，任何未登录用户都可注册租户，注册成功**原子创建「租户 + 首个 admin(固定 role=admin) + 默认工具配置」**；原私有 `POST /api/tenant` 仅保留供管理员视角建租户（走同一事务方法）。「查租户列表/详情/改状态」仍保持私有受控，禁止外部枚举。
+   - 安全底线已落地：① 建租户时首个 admin **固定 `role=admin`，调用方不可传 role，堵提权**；② 建租户 + 首个 admin + 工具配置**用 `storage.DB.Transaction` 包裹，任一步失败整体回滚**，不再留「无管理员的残缺租户」。
+   - 后续：可再加人工审核 / 邀请制（当前按 demo 不引入超管角色）。
 
 2. **用户注册接口权限**
-   - 现状：注册接口可传**任意 `tenant_id`**，谁都能注册
-   - 问题：理论上应由租户管理员创建员工，而非任意注册
-   - 后续：注册接口改为仅租户管理员可调用；或改为邀请制
+   - ⚠️ **已按需求单 0001 收敛**（2026-08-12 起）：公开 `POST /api/user/register` 现**必须校验租户存在**后才能注册，杜绝「凭空编造不存在的 tenant_id 造孤儿账号 / 冒充真实公司」。
+   - 现状：`service.Register` 进入后先 `storage.GetTenantByID` 校验租户存在，不存在返回明确「租户/公司不存在」，**不落库**；`role` 虽保留 `admin/member` 入参，但 **建租户入口已固定首个账号为 admin 且不可提权**，普通自助注册仍一律 member。
+   - 后续：是否收紧为「租户管理员创建员工 / 邀请制」按需演进（当前保留公开自助注册）。
 
 3. **租户 ID 传递安全（最高优先级）**
-   - 现状：**已落地并硬性验证** — JWT 中间件已将 `tenant_id` 注入 Context，提供 `GetTenantID` 工具；文档/检索/向量化全链路强制从 Context 拿 `tenant_id`；`storage.SearchVectors` 签名强制 `tenantID` 参数 + 内部 filter 强过滤（不传编译不过）
-   - 已验证：**多租户隔离硬性对抗测试通过**（见周六问题小节第 10 条）——租户 B 搜租户 A 的机密数据"123456"完全搜不到，A 搜自己能搜到，双向无泄漏
-   - 问题：仍需持续排查所有新增私有接口，一律从 Context 拿 `tenant_id`，前端传了也忽略（防止疏漏的接口绕过）
+   - ⚠️ **已落地并硬性验证，且注册/登录口子已补齐**（2026-08-12 起）：
+   - 私有接口侧：JWT 中间件已将 `tenant_id` 注入 Context，提供 `GetTenantID` 工具；文档/检索/向量化全链路强制从 Context 拿 `tenant_id`；`storage.SearchVectors` 签名强制 `tenantID` 参数 + 内部 filter 强过滤（不传编译不过）。
+   - **公开接口侧（唯一信任前端自报 tenant_id 的两个口子）**：`user/register` 校验租户存在（不存在拒绝）；`user/login` 校验用户所属租户**存在且 `Status==1`**（孤儿账号 / 禁用租户内的账号均拒绝登录）。
+   - 已验证：**多租户隔离硬性对抗测试通过**（见周六问题小节第 10 条）+ 需求单 0001 新增的「注册不存在租户被拒 / 禁用租户登录被拒 / 注册租户原子回滚」单测与端到端全过。
 
 4. **密码强度校验**
-   - 现状：注册时未校验密码强度
-   - 问题：弱密码不安全
-   - 后续：增加密码长度、复杂度校验
+   - 现状：注册时**保留长度校验**（`admin_password`/`password` 校验 `min=6,max=128` 等），未做复杂度强度策略（需求单 0001 明确范围外）
+   - 后续：可增加密码复杂度校验（大小写、数字、符号组合）
 
 ### 🟡 工程完善（建议改，体现工程化）
 
@@ -848,13 +851,14 @@ cmd/api(上传)  →[mq.PublishDocumentParseTask]→ RabbitMQ(document_parse 队
 ### 🟢 功能补充（时间充裕再加）
 
 10. **操作审计日志**
-    - 现状：**已落地** ✅ — `audit_logs` 表建好；`api/service/audit.go` 的 `RecordAuditLog` 工具函数已写 UploadDocument(上传/删除文档)、`UpdateToolEnabled`(修改工具配置)、`Login`(登录)、`CreateSession`(创建会话)、`Chat`(RAG问答) 6 处埋点，记录 operation/content + 从 ctx 提取 tenant_id/user_id/trace_id 落表
+    - 现状：**已落地** ✅ — `audit_logs` 表建好；`api/service/audit.go` 的 `RecordAuditLog` 工具函数已写 UploadDocument(上传/删除文档)、`UpdateToolEnabled`(修改工具配置)、`Login`(登录)、`CreateSession`(创建会话)、`Chat`(RAG问答) 5 处埋点 + **`RegisterTenant`(注册租户)** 需求单 0001 新增埋点。记录 operation/content + 从 ctx 提取 tenant_id/user_id/trace_id 落表
     - 单测：`api/service/session_test.go` 的 `TestCreateSessionAudit`（连真实 MySQL，验证创建会话埋点 tenant/user/trace 落库）+ 端到端脚本 `scripts/e2e_user_journey.sh` 第 11 步覆盖 登录/上传文档/创建会话/RAG问答 四类审计，并校验 RAG 问答 content 记录了命中工具
-    - 后续：可再增至更多操作（创建租户、删除会话、用量查询等）；并提供管理端审计日志查询接口
+    - ⚠️ 需求单 0001 补充：公开注册租户同样落审计（`operation='注册租户'`，公开接口无当前操作者，用新建的租户 ID + 管理员 ID 补齐 tenant_id/user_id，trace_id 沿用请求级），`.data` 返回的 admin/token 保证可查该笔审计
+    - 后续：可再增至更多操作（删除会话、用量查询等）；并提供管理端审计日志查询接口
 
 11. **租户状态未拦截**
-    - 现状：租户被禁用后，用户可能仍能登录
-    - 后续：登录时检查租户状态，禁用租户禁止登录；JWT 中间件也可校验
+    - ⚠️ **已按需求单 0001 解决**（2026-08-12 起）：`service.Login` 登录时校验用户所属租户**存在且 `Status==1`**，禁用租户 / 孤儿租户（不存在）内的账号一律拒绝登录，返回明确「该租户已被禁用/login 被拒」。
+    - 后续：可选在 JWT 中间件也校验租户状态（当前登录态下发后租户状态变更需等 token 过期，属可接受取舍）
 
 12. **无刷新 token 机制**
     - 现状：`access_token` 过期就得重新登录

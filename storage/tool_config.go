@@ -99,8 +99,22 @@ func DisableTool(ctx context.Context, tenantID uint64, toolName string) error {
 // 对 DefaultTools 中的每个工具：若该租户尚无配置则写为开启；已有则不覆盖
 // （管理员可能已自定义），保证幂等。
 func InitDefaultToolConfigs(ctx context.Context, tenantID uint64) error {
+	return initDefaultToolConfigsWithDB(ctx, DB, tenantID)
+}
+
+// InitDefaultToolConfigsTx 在调用方显式事务内初始化默认工具配置（供注册租户的事务使用）。
+// tx 由上层 service 用 storage.DB.Transaction 包裹传入，保证与其它子步骤同事务、原子提交。
+func InitDefaultToolConfigsTx(ctx context.Context, tx *gorm.DB, tenantID uint64) error {
+	return initDefaultToolConfigsWithDB(ctx, tx, tenantID)
+}
+
+// initDefaultToolConfigsWithDB 以指定的 *gorm.DB（默认连接或事务句柄）完成默认工具配置初始化。
+// 对 DefaultTools 中的每个工具：若该租户尚无配置则写为开启；已有则不覆盖，保证幂等。
+func initDefaultToolConfigsWithDB(ctx context.Context, db *gorm.DB, tenantID uint64) error {
 	for _, name := range DefaultTools {
-		_, err := GetToolConfig(ctx, tenantID, name)
+		var cfg model.TenantToolConfig
+		err := db.WithContext(ctx).Where("tenant_id = ? AND tool_name = ?", tenantID, name).
+			First(&cfg).Error
 		if err == nil {
 			// 已有配置（可能被自定义），跳过，不覆盖
 			continue
@@ -109,8 +123,13 @@ func InitDefaultToolConfigs(ctx context.Context, tenantID uint64) error {
 			// 数据库异常，中断，避免初始化不完整
 			return err
 		}
-		// 查不到 → 默认开启（UpdateToolConfig 会作为创建处理）
-		if err := UpdateToolConfig(ctx, tenantID, name, true); err != nil {
+		// 查不到 → 默认开启（直接创建）
+		rec := model.TenantToolConfig{
+			TenantID: tenantID,
+			ToolName: name,
+			IsEnable: true,
+		}
+		if err := db.WithContext(ctx).Create(&rec).Error; err != nil {
 			return err
 		}
 	}

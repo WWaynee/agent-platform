@@ -9,7 +9,7 @@ import (
 // 租户表 tenant
 type Tenant struct {
 	ID            uint64 `gorm:"primaryKey"`
-	Name          string `gorm:"size:128;not null;comment:租户名称"`
+	Name          string `gorm:"size:128;not null;uniqueIndex;comment:租户名称（唯一，企业同名不可重复注册）"`
 	Status        int8   `gorm:"default:1;comment:0禁用 1启用"`
 	QuotaLlmToken int64  `gorm:"default:0;comment:LLM token配额"`
 	CreatedAt     time.Time

@@ -1,12 +1,13 @@
 CREATE TABLE `tenants` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `name` varchar(128) NOT NULL COMMENT '租户名称',
+  `name` varchar(128) NOT NULL COMMENT '租户名称（唯一，企业同名不可重复注册）',
   `status` tinyint NOT NULL DEFAULT '1',
   `quota_llm_token` bigint NOT NULL DEFAULT '0',
   `created_at` datetime(3) DEFAULT NULL,
   `updated_at` datetime(3) DEFAULT NULL,
   `deleted_at` datetime(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_tenants_name` (`name`),
   KEY `idx_tenants_deleted_at` (`deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='租户表';
 

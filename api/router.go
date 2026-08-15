@@ -28,8 +28,9 @@ func NewRouter() *gin.Engine {
 		r.GET("/health", handler.Health)
 
 		// 用户注册 / 登录（未登录才能调用）
-		public.POST("/user/register", handler.Register) // 用户注册
-		public.POST("/user/login", handler.Login)       // 用户登录
+		public.POST("/user/register", handler.Register)         // 用户注册（校验租户存在）
+		public.POST("/user/login", handler.Login)               // 用户登录（校验租户存在/启用）
+		public.POST("/tenant/register", handler.RegisterTenant) // 注册租户（原子创建租户+首个admin+工具配置）
 	}
 
 	// 私有路由组（挂 JWT 鉴权中间件，必须带有效 token 才能访问）

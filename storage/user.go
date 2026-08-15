@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"agent-platform/storage/model"
+
+	"gorm.io/gorm"
 )
 
 // ============ Storage 层：用户数据操作 ============
@@ -13,6 +15,12 @@ import (
 // CreateUser 插入一条用户记录
 func CreateUser(ctx context.Context, user *model.User) error {
 	return DB.WithContext(ctx).Create(user).Error
+}
+
+// CreateUserTx 在调用方显式事务内插入一条用户记录。
+// tx 由上层 service 用 storage.DB.Transaction 包裹传入，保证与其它子步骤同事务、原子提交。
+func CreateUserTx(ctx context.Context, tx *gorm.DB, user *model.User) error {
+	return tx.WithContext(ctx).Create(user).Error
 }
 
 // GetUserByUsername 按租户 + 用户名查询用户
