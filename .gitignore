@@ -8,6 +8,8 @@ bin/
 *.exe
 *.out
 *.test
+# 根目录 go build 直接产物（临时编译，勿提交）。锚定根目录，避免误匹配 tools/fault_inject_llm 源码目录
+/fault_inject_llm
 
 # 日志文件
 *.log

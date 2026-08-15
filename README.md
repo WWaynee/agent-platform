@@ -289,7 +289,10 @@
 
 > 📌 周日追加成果②（超长上下文自动压缩，已落地）：
 > - 压缩下沉到 **Memory 层**（`agent/memory/compressing.go` 的 `CompressingMemory` 装饰器）：包裹底层 `RedisMemory` / `InMemoryMemory`，**在 `AddMessage` 时检查该会话历史总 token**，超阈值（`CompressThresholdTokens=2000`）即自动压缩——**业务层（引擎）无感知**，只正常拿历史 / 加消息。
-> - 压缩内部逻辑：拆新旧 → 旧历史经注入的 `Summarizer`（`ReActEngine.Summarize`，真实 LLM）生成中文摘要 → 组装 `[system 摘要 + 最近 3 轮原文]` → 写回底层。**摘要失败（LLM）降级**为丢弃旧消息、保留最近几轮，不中断对话；**防频繁套娃**（历史首条已是 system 摘要则本轮不重复压缩）。
+> - 压缩内部逻辑：拆新旧 → 旧历史经注入的 `Summarizer`（`ReActEngine.Summarize`，真实 LLM）生成中文摘要 → 组装 `[system 摘要 + 最近 3 轮原文]` → 写回底层。**摘要失败（LLM）降级**为丢弃旧消息、保留最近几轮，不中断对话。
+> - ⚠️ **修复过的一个 bug（超长上下文处理测试中发现）**：原实现为"防频繁套娃"，只要历史首条已是 system 摘要（说明刚压缩过）就**不再压缩**。这会让首次压缩后历史一直以 system 开头、之后**永不再压缩、token 无限膨胀**——实测 20 轮长对话 token 涨到 45556，远超 LLM 上下文窗口。
+>   → 修复：`shouldCompress` 改为**超长即压缩、不再因首条是 system 而阻断**；压缩时首条旧 system 摘要会随其后旧消息一起被折叠进**更新的摘要**，保留最近几轮。修复后 20 轮长对话 token 稳定在 ~7220（不膨胀），历史首条始终是 system 摘要；新增单测 `TestCompressingMemory_RecompressAfterSystem`（含"首条已是 system 仍能二次压缩、token 回落"）回归。
+>   → 端到端脚本 `scripts/e2e_long_context.sh`：连续 20 轮长对话验证自动压缩（token 稳定不回涨）、堆长后继续对话正常、5000 字/20400 字节超长问题被 `query max=2000` 参数校验直接 400 拒绝（未进 LLM）。
 > - 生产装配（`cmd/api/main.go`）：`baseMem=NewRedisMemory` + `agentEngine`；再以 `agentEngine.Memory = NewCompressingMemory(baseMem, agentEngine)` 替换；`agentEngine` 即实现 `memory.Summarizer`。
 > - 触发时机：每 `AddMessage` 后检查；阈值 / 保留轮数 / 结构见 `compressing.go` 常量。
 > - 自测：短对话不压缩 ✅；超长对话自动压缩（单测用注入 Summarizer 的 mock，另用真实 Redis+LLM 冒烟验证）✅；压缩后 token 下降 ✅；摘要失败降级 ✅。`go test ./agent/...` 全绿。
@@ -456,13 +459,74 @@
 
 #### 周五・全链路联调 & 异常测试
 
-- [ ] 端到端完整流程联调
+- [x] 端到端完整流程联调
 - [ ] LLM 接口故障降级测试
 - [ ] 工具执行失败容错测试
-- [ ] 超长上下文处理测试
-- [ ] 多租户并发隔离测试
+- [x] 超长上下文处理测试（含发现并修复"防套娃导致永不二次压缩、历史无限膨胀"bug，见周日成果②补记）
+- [x] 多租户并发隔离测试（已完成，详见下表）
 - [ ] 并发会话测试
 - [ ] 修复发现的 bug
+
+> 📌 周五追加成果③（多租户并发隔离测试 —— 项目核心卖点终极验证，已落地 ✅）：
+> 在已有"周六多租户隔离验证"基础上，补齐**并发场景**与**会话越权**两类硬性验证，并新增测试脚本与一个接口：
+>
+> - **新增接口 `GET /api/session/:id/messages`（会话历史查询）**：
+>   - `api/service/session.go` `GetSessionMessages(ctx, tenantID, userID, id)`：**先归属校验后取数**（多租户/多用户越权防护），从 Redis 读该会话消息历史返回 `[{role,content}]` 正序。
+>   - 越权防线两道：① `storage.GetSessionByID(ctx, tenantID, id)` 带租户过滤查询，跨租户/不存在统一 `gorm.ErrRecordNotFound`（不区分"不存在"与"无权"，防横向探测）；② `s.UserID != userID` 再校验本人，跨用户一律拒绝。
+>   - `api/handler/session.go` `GetSessionMessages`：越权统一返回 **403 "会话不存在或无权访问"**，不泄露任何内容。
+> - **端到端并发隔离脚本 `scripts/e2e_tenant_isolation.sh`**（全新租户 A/B，各上传含独家机密"苹果香蕉梨 123456"/"橘子葡萄西瓜 789012"的文档）：
+>   - *确定性向量隔离*：A 搜 `橘子葡萄西瓜 789012` 搜不到 B / B 搜 `苹果香蕉梨 123456` 搜不到 A（双向）；
+>   - *越权文档*：B 拿 A 的文档 ID 查详情/删除 → 均 400 "文档不存在"（A 文档完好未删）；
+>   - *越权会话*：B 拿 A 的会话 ID 查历史 → **403**；删除 → 400（新增接口的越权防护生效）；A/B 查自己的历史均正常；
+>   - *并发提问*：A 并行问"橘子葡萄西瓜是什么"、B 并行问"苹果香蕉梨是什么"，**两端回答均不含对方机密** → 并发下隔离依然有效。
+>   - 实测：**18 项断言全过 / 失败 0 项 / 无任何数据越权**（含并发两 chat 均 0s 收敛、各自只基于自身检索结果作答）。
+> - **mock 增强（`tools/fault_inject_llm`）**：ok 模式升级为**知识问答式(ReAct 驱动)**应答 —— 首次提问返回 `knowledge_retrieve` 动作触发检索；引擎喂回"知识库检索观察"后基于观察 `final_answer`（只引述观察内容、绝不凭自身编造）→ 使端到端（尤其并发隔离）验证真实走通"提问→检索→作答"，且从 LLM 侧同样保证"搜不到对端片段、不越权"。
+> - 全部 `go vet` / `go test ./...` / `go build ./...` 通过。
+
+> 📌 周五追加成果④（同一用户多会话并发隔离测试，已落地 ✅）：
+> 验证"同一用户开多个会话，每个会话上下文各自独立、互不串"——这是 SaaS 多租户下**同租户内多会话**的基础隔离。
+> - **新增端到端脚本 `scripts/e2e_session_isolation.sh`**（场景直接对应 PRD）：
+>   - 全新租户 → 注册普通用户 → 建 3 个会话（会话1/2/3）；
+>   - 每个会话各说一句自我介绍：会话1"我叫张三"、会话2"我叫李四"、会话3"我叫王五"；
+>   - 三会话并发问"我叫什么？"，验证各自回答对应**自己的**上下文，互不串；
+>   - 自测点①不同会话上下文不串：会话1→选？否，应返回张三、会话2→李四、会话3→王五，且各自答案绝不含另两个名字；
+>   - 自测点②并发情况下依然隔离：三会话**同时**提问仍各自答对；
+>   - 自测点③会话列表能看到所有会话（`GET /api/session/list` 含全部 3 个会话）。
+>   - 实测：**24 项断言全过 / 失败 0 项**，会话之间完全隔离、上下文不串、并发下依然有效。
+> - **mock 增强（会话内自我介绍记忆）**：`tools/fault_inject_llm` 的 `decideReActAction` 增加会话记忆推断——引擎把本会话（Redis 按 tenant+session 隔离）历史整体拼进 messages 喂给 LLM，mock 从中提取"我叫X/我的名字是X/名字叫X"；当本消息是自我介绍即确认记住；当询问"我叫什么"时，基于**本会话**历史记忆作答（`根据本会话前的记忆，你叫X`）。
+>   - 🧠 隔离要点：mock 只从**当前会话**的 messages 历史取名字，而历史本就按 `session:{tenant}:{sid}` 隔离存储 → 从 LLM 侧同样保证"会话之间上下文不互通"。
+>   - 踩坑：`strings.Index` 返回**字节偏移**，最初误用 `len([]rune(kw))` 取 offset 导致中文截断乱码（"你叫叫张三"），修复为与字节偏移配套的 `len(kw)`。
+> - **验证根因**：chat 层 `session_id` 关联 Redis key（存储层天然按会话隔离）+ 会话列表/详情带 `tenant_id+UserID` 过滤 —— 同一用户不同会话的上下文各自独立、互不复用。
+> - 全部 `go vet` / `go test ./...` / `go build ./...` 通过。
+
+> 📌 周五追加成果⑤（限流功能端到端验证，已落地 ✅）：
+> 验证限流**真实生效**（不再是只看代码/单测），对应第二周周三的限流实现，覆盖全部 4 个自测点。
+> - **新增端到端脚本 `scripts/e2e_rate_limit.sh`**（场景直接对应 PRD：快速刷请求→超阈值 429→窗口后自动恢复→租户 A 限流不影响租户 B→对话接口比普通接口更严格）：
+>   - **① 超限返回 429（普通接口）**：用户快速刷 `GET /api/session/list` 70 次 —— 前 60 次 200、**第 61 次起返回 429**（命中用户级阈值 `UserPerMin=60`，默认 `RATE_LIMIT_USER_PER_MIN=60`）；
+>   - **② 限流后自动恢复**：等待 62s（窗口 `RATE_LIMIT_WINDOW_SEC=60` 滑出）后**同一用户**再发 —— 恢复 200；
+>   - **③ 多租户限流独立**：租户 A 用户打满（持续 429）时，**全新租户 C 3 次请求全部 200** → 限流 key 按租户/用户各自隔离（Redis `ratelimit:tenant:{id}` / `ratelimit:user:{id}`），A 被打爆不拖累其它租户；
+>   - **④ 对话接口限流更严格**：快速刷 `POST /api/chat` —— **第 21 次即返回 429**（对话专属阈值 `ChatPerMin=20`，`RATE_LIMIT_CHAT_PER_MIN=20`），对比普通接口第 61 次才 429 → **对话因为是调 LLM 高成本接口，单独更严格、更早拦截**。
+> - **实现复盘（链路已在第二周周三落地）**：`api/middleware/ratelimit.go` 三层滑动窗口（租户级 `TenantPerMin` + 用户级 `UserPerMin` + 对话级 `ChatPerMin`），底层 `storage.AllowRequest` 走 **Redis ZSet + Lua 原子脚本**（分布式、并发一致）；`POST /api/chat` 先过普通 `RateLimiter` 再叠加 `ChatRateLimiter` 与 `QuotaInterceptor`（限流→配额→业务）；阈值全在 `config`（`RATE_LIMIT_*` 环境变量）不写死。
+> - 实测：4 个自测点全过 / 失败 0 项（多租户独立 + 对话更严格尤其关键，双重证明"限流独立+分层严格"）。
+> - 全部 `go vet` / `go test ./...` / `go build ./...` 通过。
+
+> 📌 周五追加成果⑥（核心接口性能巡检，已落地 ✅）：
+> 目标"看核心接口性能、有无明显慢接口"，新增端到端脚本 `scripts/e2e_perf_check.sh`，对应 5 个自测点全部实测：
+> - **① 普通接口响应时间 < 100ms**：文档列表 avg **3.1ms** / 会话列表 avg **3.2ms**（各 15 次采样，远低于 100ms 目标，单次最大也 ~21ms 内）✅
+> - **② 对话接口响应时间**：简单问题走本地 ReAct + mock LLM avg **~350-470ms/次**，耗时**主要花在 LLM 环节**（本地 Redis/路由极快）；真实 DeepSeek 会更高（1-5s），属 LLM 网络+推理正常耗时 ✅
+> - **③ 慢查询检查**：全程 **0 条 GORM `>=100ms` 慢查询日志**——`storage/db_logger.go` 内置 `dbSlowThreshold=100ms`，本次大量列表/对话请求期间无任何慢 SQL，**DB 层索引/查询无需优化** ✅
+> - **④ 并发能力**：并发 10（含混合 40 请求压力）**全部 200 不崩**，并发 avg **4.3-19.9ms**、max ~59ms——对比单请求 ~3ms，延迟仅随并发个位数倍增长、**无指数级增长**，压测后 `/health` 健康 ✅
+> - **⑤ 没有内存泄漏**：多轮(每轮 30-100 请求)负载后 api 进程 **RSS 收敛在 ~36-38MB 稳定水位**，第 2 轮后停止增长、结束甚至回落到 36.8MB——Go 堆复用达标，**无每轮持续攀升的泄漏特征** ✅
+> - **结论**：核心接口（文档/会话列表、对话）响应健康、无慢 SQL、并发稳定、无内存泄漏；**无需加索引或额外优化**。若日后真实 LLM 接入导致对话慢，属外部网络/推理耗时，非本地短板。
+> - 全部 `go vet` / `go test ./...` / `go build ./...` 通过。
+
+> 📌 周五主流程回归确认（周五当天 12 个验证点全部跑通，已落地 ✅）：
+> 逐个跑完周五清单里新用户旅程 / 管理权限 / 多角色 / 存储一致 / LLM 故障 / 工具容错 / 依赖故障 / 超长上下文 / 多租户隔离 / 会话隔离 / 限流 / 性能共 12 项，**全部通过、失败 0 项**；`go test ./...` 14 个包全绿；并跑通修完 bug 后的主流程回归（用户旅程 18/18、管理 16/16）。
+
+> ⚠️ 周五测试注意点（已修复/已确认，供后续参考）：
+> - **用量口径**：用量统计的 `calls` 计的是「LLM 调用次数」而非「对话提问次数」——ReAct 回答一个问题会多轮调 LLM（决策+检索+作答），故一次提问可能记 2 次及以上。查用量别按「对话数=调用数」对账。
+> - **对话"常识问题/工具被禁"的表达**：测试用的本地 mock LLM 已补上对常识问题直接作答、对已禁用工具明确"未启用"的处理，避免出现"反复尝试调用同一禁用工具、最终只回未收敛"的僵硬答复；真实 LLM 会更好地自然回答。
+> - **日志与工具**：本轮新增的工具超时兜底（坏工具不无限等待）、RabbitMQ 自动重连（挂掉恢复后无需重启）、LLM 超时/5xx/熔断降级，均已生效并有单测/联调覆盖。
 
 #### 周六・文档整理 & 架构图
 
@@ -578,6 +642,7 @@ agent-platform/
 │   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单：显式关闭即拒，查不到默认放行）
 │   │   ├── tool_admin.go      #   工具开关配置（租户管理）：GetToolEnabled / UpdateToolEnabled（查不到默认启用）
 │   │   ├── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
+│   │   │                      #   + GetSessionMessages(会话历史查询：带租户过滤+UserID本人校验，越权统一拒绝)
 │   │   ├── usage.go           #   Token 用量统计业务：实现 llmclient.UsageReporter 钩子（从 ctx 取租户/用户→Redis 累加）+ 当天/历史查询
 │   │   ├── quota.go           #   租户 Token 配额校验：CheckTenantTokenQuota（读 QuotaLlmToken + 当月 Redis 用量对比）
 │   │   ├── health.go          #   依赖健康检查：CheckMySQL/Redis/MinIO/Qdrant/RabbitMQ（各带超时）+ CheckAll 聚合(任一 down→unhealthy)

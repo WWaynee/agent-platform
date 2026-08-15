@@ -199,9 +199,12 @@ CTODAY=$(curl -s "$BASE/api/admin/usage/today" -H "$AH" | jqx ".data.calls")
 TODAY=$(date -u +%Y-%m-%d)
 RDIS_CALLS=$(redis_get "usage:tenant:$TID:$TODAY:calls")
 RDIS_TOKENS=$(redis_get "usage:tenant:$TID:$TODAY:token")
-EXPECT=$((C0 + 3))
-[ "$CTODAY" = "$EXPECT" ] && ok "发起 3 次对话后 usage/today calls 由 $C0 → $CTODAY（增量=3）✅" \
-  || bad "用量计数增量不符：$C0 → $CTODAY（期望+3）"
+# 说明：usage 的 calls 统计的是「LLM 调用次数」，而每次对话（ReAct）会多次调 LLM
+# （决策轮 + 工具检索 + 作答轮），故 3 次对话的增量是"≥3 且 >0 增长"，而非固定 +3。
+# 因此不依赖固定增量；验收要点 = ①确实发生调用（增量≥3）②Redis 计数与接口完全一致（无脏数据）。
+[ "$CTODAY" -ge $((C0 + 3)) ] \
+  && ok "发起 3 次对话后 usage/today calls 由 $C0 → $CTODAY（实际增量=$((CTODAY-C0))，≥3 次真实验）✅" \
+  || bad "3 次对话后调用次数未增长：$C0 → $CTODAY"
 [ "$RDIS_CALLS" = "$CTODAY" ] && ok "Redis 计数(calls=$RDIS_CALLS) 与 usage/today($CTODAY) 完全一致 ✅" \
   || bad "Redis calls=$RDIS_CALLS 与接口 $CTODAY 不一致"
 [ "$RDIS_TOKENS" ] && [ "$RDIS_TOKENS" != "0" ] && ok "Redis token 计数=$RDIS_TOKENS（>0，有真实消耗）✅" \
