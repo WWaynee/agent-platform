@@ -104,10 +104,12 @@ func TestEngineMemory_HistoryPersistedToMemory(t *testing.T) {
 	}
 }
 
-// TestEngineMemory_MiddleToolProcessNotPersisted
-// 中间工具调用过程不写回历史（符合"存最终问答"设计）：一轮里既调工具又 final_answer，
-// Memory 里应只有最终 user/assistant，不该有工具中间的 user 观察消息。
-func TestEngineMemory_MiddleToolProcessNotPersisted(t *testing.T) {
+// TestEngineMemory_MiddleToolProcessPersistedAsSummary
+// 中间工具调用以"模板化摘要"写回热轨（需求单 0002：工具调用纳入完整历史与压缩）：
+// 一轮里既调工具又 final_answer，Memory 里应为
+//   [user(提问), user([工具] 模板化摘要), assistant(回答)]，共 3 条。
+// 既让下一轮 LLM 记得上轮调过什么工具，又不把工具原文巨量塞进上下文。
+func TestEngineMemory_MiddleToolProcessPersistedAsSummary(t *testing.T) {
 	llm := &captureLLM{
 		replies: []string{
 			`{"action":"ok_tool","action_input":"1"}`,
@@ -124,7 +126,17 @@ func TestEngineMemory_MiddleToolProcessNotPersisted(t *testing.T) {
 	}
 
 	hist := mem.GetHistory(1, "sess-3")
-	if len(hist) != 2 {
-		t.Fatalf("Memory 里应只存最终 user/assistant 2 条, got %d: %+v", len(hist), hist)
+	if len(hist) != 3 {
+		t.Fatalf("应存 3 条: user(提问)+user(工具摘要)+assistant(回答), got %d: %+v", len(hist), hist)
+	}
+	if hist[0].Role != memory.RoleUser || !strings.Contains(hist[0].Content, "帮我查一下") {
+		t.Fatalf("第 1 条应为用户提问, got %+v", hist[0])
+	}
+	// 第 2 条是工具模板化摘要：以 user 角色承载，内容以 [工具] 开头
+	if hist[1].Role != memory.RoleUser || !strings.Contains(hist[1].Content, "[工具] ok_tool") {
+		t.Fatalf("第 2 条应为工具模板化摘要(user 角色, [工具] 前缀), got %+v", hist[1])
+	}
+	if hist[2].Role != memory.RoleAssistant || !strings.Contains(hist[2].Content, "已根据工具结果回答") {
+		t.Fatalf("第 3 条应为助手回答, got %+v", hist[2])
 	}
 }

@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"agent-platform/agent/memory"
@@ -75,6 +77,22 @@ type ReActEngine struct {
 	// 超时会以「带 deadline 的运行时 ctx」注入工具（经 AgentContext.ToContext 下传），
 	// 工具引擎据此监听 ctx.Done() 中止耗时操作，避免单个坏工具把整轮回复拖死/无限等待。
 	ToolTimeout time.Duration
+
+	// fullHistorySink 冷轨完整历史落库接口（可选）。nil 则整条冷轨链路静默跳过，
+	// 不影响热轨对话（见 SetFullHistorySink / persistFullHistory）。
+	fullHistorySink FullHistorySink
+}
+
+// SetFullHistorySink 注入冷轨完整历史落库 sink。
+// nil 安全：传 nil 等价于关闭冷轨（persistFullHistory 内会判空跳过）。
+func (e *ReActEngine) SetFullHistorySink(s FullHistorySink) {
+	e.fullHistorySink = s
+}
+
+// toolRecord 记录一次工具调用的完整过程（指令 + 执行结果），供冷轨落库 + 热轨模板化摘要。
+type toolRecord struct {
+	call   ToolCall // 工具调用指令（工具名 + 参数）
+	result string   // 工具执行结果（观察结果 out）
 }
 
 // NewReActEngine 构造一个 ReAct 引擎。
@@ -123,8 +141,9 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 	msgs := e.buildInitialMessages(ctx, history, query)
 
 	var calls []ToolCall
-	var lastRaw string // 记录 LLM 最后一次原始输出（兜底用）
-	parseRetry := 0    // 解析失败重试次数（最多 1 次）
+	var toolRecords []toolRecord // 本轮工具调用完整记录（含指令+结果），供冷轨/热轨摘要
+	var lastRaw string           // 记录 LLM 最后一次原始输出（兜底用）
+	parseRetry := 0              // 解析失败重试次数（最多 1 次）
 
 	// 引擎运行日志统一经 AgentContext 取 logger：自动带 trace_id / tenant_id / user_id，
 	// 使 Agent 全链路（本轮迭代/LLM/工具）与 HTTP 入口共享同一 trace_id。
@@ -169,12 +188,14 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 
 		// e. final_answer → 结束循环，返回答案
 		if parsed.Action == finalAnswerAction {
-			e.persist(ctx, query, parsed.Input)
+			e.persist(ctx, query, parsed.Input, toolRecords)
 			return &AgentResponse{Answer: parsed.Input, ToolCalls: calls}, nil
 		}
 
 		// f/g. 工具调用：记录审计 + 经 ToolManager 统一执行（含租户权限校验）
-		calls = append(calls, ToolCall{ToolName: parsed.Action, Params: rawInputToParams(parsed.Input)})
+		//     统一解析一次参数，同时供 ToolCall 审计与 toolRecord 记录使用。
+		callParams := rawInputToParams(parsed.Input)
+		calls = append(calls, ToolCall{ToolName: parsed.Action, Params: callParams})
 
 		// 工具执行超时保护：为本次调用注入「带 deadline 的运行时 ctx」。
 		// 以携带 tenant/user/trace_id 的基准 ctx 派生，经 AgentContext.WithRuntimeContext
@@ -190,6 +211,11 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		if terr != nil {
 			out = fmt.Sprintf("工具 %q 执行失败: %v", parsed.Action, terr)
 		}
+		// 收集工具调用记录（供冷轨落库 + 热轨模板化摘要）
+		toolRecords = append(toolRecords, toolRecord{
+			call:   ToolCall{ToolName: parsed.Action, Params: callParams},
+			result: out,
+		})
 		alogger.Info("ReAct 工具调用完成",
 			zap.String("session_id", ctx.SessionID),
 			zap.String("tool_name", parsed.Action),
@@ -209,7 +235,7 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 	// 5. 达到最大迭代：强制结束，返回最后一次内容（兜底收尾）
 	resp := e.fallbackResponse(lastRaw)
 	resp.ToolCalls = calls // 兜底响应也需要附带本轮工具调用记录，避免丢失审计信息
-	e.persist(ctx, query, resp.Answer)
+	e.persist(ctx, query, resp.Answer, toolRecords)
 	return resp, nil
 }
 
@@ -225,19 +251,93 @@ func (e *ReActEngine) buildInitialMessages(ctx AgentContext, history []memory.Ch
 	return msgs
 }
 
-// persist 把"本轮的用户提问 + 引擎最终回答"写回 Memory（user + assistant 两条）。
+// persist 把"本轮对话"写回两处：热轨（Memory，可压缩）+ 冷轨（完整原文落库）。
 //
-// 设计（中间过程存不存历史）：只存**最终问答**，不存中间过程。
-//   - 中间轮次的 LLM 思考（reasoning）与工具观察结果，只在当次请求内部的 msgs 快照里即时消费，
-//     事后不写回 Memory——下一轮上下文只需知道"上轮问了什么、答了什么"，无需重放工具调用全过程。
-//   - 存得少则占 token 少，Memory 层（CompressingMemory）超长自动压缩也更省。
-//   - 工具调用过程不丢：通过 AgentResponse.ToolCalls 返回，供审计 / 前端逐步展示。
-//
-// 每次写入都经 Memory.AddMessage；因装配了 CompressingMemory，若该会话累计超长，
-// 会在写入后由 Memory 自动触发摘要压缩，引擎无需关心压缩细节。
-func (e *ReActEngine) persist(ctx AgentContext, query, answer string) {
+// ① 热轨（Redis，超长自动压缩）——只存"用户提问 + 工具调度汇总 + 最终回答"：
+//    - 工具调用不再丢，改成一句**模板化摘要**（summarizeToolCall，零额外 LLM 调用）以 user 角色写入，
+//      既让下一轮 LLM 记得上轮调过什么工具、拿到什么结论，又不把巨量工具原文塞进上下文；
+//    - 中间轮次的 LLM 思考不写（占 token 高且价值低），只留最终问答 + 工具摘要。
+//    装配了 CompressingMemory 时，若该会话累计超长会由 Memory 自动触发摘要压缩，引擎无需关心。
+// ② 冷轨（MySQL，永不压缩）——完整原文逐条落库（用户提问、工具指令、工具结果、最终回答）：
+//    异步后台写，不阻塞对话响应；任一条失败只 warn（对齐 RecordAuditLog 的"尽力而为"风格）。
+func (e *ReActEngine) persist(ctx AgentContext, query, answer string, toolRecords []toolRecord) {
+	// ① 热轨：写最终问答 + 每轮工具调用的一句话模板化摘要
 	e.Memory.AddMessage(ctx.TenantID, ctx.SessionID, memory.ChatMessage{Role: memory.RoleUser, Content: query})
+	for _, tr := range toolRecords {
+		e.Memory.AddMessage(ctx.TenantID, ctx.SessionID, memory.ChatMessage{
+			Role:    memory.RoleUser, // 规避 tool 角色喂 LLM 的 DeepSeek 协议坑，用 user 承载
+			Content: summarizeToolCall(tr),
+		})
+	}
 	e.Memory.AddMessage(ctx.TenantID, ctx.SessionID, memory.ChatMessage{Role: memory.RoleAssistant, Content: answer})
+
+	// ② 冷轨：完整原文异步逐条落库（尽力而为，不阻塞对话）
+	e.persistFullHistory(ctx, query, answer, toolRecords)
+}
+
+// persistFullHistory 冷轨完整历史落库（异步、尽力而为）。
+// 用独立的后台 goroutine 写 MySQL，不阻塞对话主流程；失败只 warn（审计风格）。
+// 顺序保证：多条 Append 在同一个 goroutine 内按序执行，保留对话真实时序。
+func (e *ReActEngine) persistFullHistory(ctx AgentContext, query, answer string, toolRecords []toolRecord) {
+	sink := e.fullHistorySink
+	if sink == nil {
+		return // 未注入冷轨 sink（关闭冷轨），静默跳过
+	}
+
+	// 组装本次全部待落库消息（提问、每个工具指令+结果、最终回答），按时间正序。
+	msgs := make([]ChatMsg, 0, 2+2*len(toolRecords))
+	appendMsg := func(role, kind, content string) {
+		msgs = append(msgs, ChatMsg{
+			TenantID:  ctx.TenantID,
+			UserID:    ctx.UserID,
+			SessionID: ctx.SessionID,
+			Role:      role,
+			Kind:      kind,
+			Content:   content,
+		})
+	}
+
+	appendMsg("user", "question", query)
+	for _, tr := range toolRecords {
+		// 工具调用指令：Content 存「工具名 + 参数（序列化成的 JSON 字符串）」
+		appendMsg("tool", "tool_call", tr.call.ToolName+" "+toolParamsJSON(tr.call.Params))
+		// 工具执行结果：Content 存工具返回的完整原文
+		appendMsg("tool", "tool_result", tr.result)
+	}
+	appendMsg("assistant", "answer", answer)
+
+	// 异步后台写入：基于 AgentContext 译出的标准 ctx 派生（保留 trace_id/tenant_id/user_id），
+	// 不能复用请求上下文（请求结束会被 cancel）。每条失败只 warn、不阻塞。
+	go func() {
+		base := ctx.ToContext(nil) // 带 tenant/user/trace_id 的标准 ctx
+		alogger := observability.WithAgentContext(ctx)
+		for _, m := range msgs {
+			if err := sink.Append(base, m); err != nil {
+				alogger.Warn("写完整历史失败",
+					zap.String("role", m.Role),
+					zap.String("kind", m.Kind),
+					zap.Error(err))
+			}
+		}
+	}()
+}
+
+// toolParamsJSON 把工具调用参数（map）序列化成 JSON 字符串，供冷轨 tool_call 落库。
+// 序列化失败时降级为原样 Key-Value 文本，保证不因参数格式问题丢记录。
+func toolParamsJSON(params map[string]any) string {
+	if len(params) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(params)
+	if err != nil {
+		// 降级：逐 key 拼接（尽力而为）
+		var kvs []string
+		for k, v := range params {
+			kvs = append(kvs, k+"="+fmt.Sprintf("%v", v))
+		}
+		return strings.Join(kvs, ", ")
+	}
+	return string(b)
 }
 
 // fallbackResponse 最大迭代终止时的兜底响应：能解析出 final_answer 就用它，

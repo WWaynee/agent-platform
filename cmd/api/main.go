@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"agent-platform/agent/engine"
+	"agent-platform/agent/interfaces"
 	"agent-platform/agent/memory"
 	"agent-platform/agent/toolmanager"
 	"agent-platform/api"
@@ -18,10 +21,29 @@ import (
 	"agent-platform/mq"
 	"agent-platform/observability"
 	"agent-platform/storage"
+	"agent-platform/storage/model"
 	"agent-platform/toolkit"
 
 	"go.uber.org/zap"
 )
+
+// chatMsgSink 把 storage.AppendChatMessage 适配成 engine.FullHistorySink。
+// SessionID 是字符串（对应 sessions.id 的十进制），转成 uint64 落库（纯数字，转换必然成功）。
+// TraceID 一律从标准 ctx 取（全链路经 AgentContext.ToContext 已种入，冷轨落库日志带同链路 ID）。
+type chatMsgSink struct{}
+
+func (chatMsgSink) Append(ctx context.Context, m engine.ChatMsg) error {
+	sid, _ := strconv.ParseUint(m.SessionID, 10, 64)
+	return storage.AppendChatMessage(ctx, &model.ChatMessage{
+		TenantID:  m.TenantID,
+		UserID:    m.UserID,
+		SessionID: sid,
+		Role:      m.Role,
+		Kind:      m.Kind,
+		Content:   m.Content,
+		TraceID:   interfaces.TraceIDFromCtx(ctx),
+	})
+}
 
 func main() {
 	// 1. 加载配置
@@ -115,8 +137,13 @@ func main() {
 		// agentEngine 实现了 memory.Summarizer，故直接作为摘要生成器注入。
 		agentEngine.Memory = memory.NewCompressingMemory(baseMem, agentEngine)
 
+		// 注入冷轨完整历史落库 sink：把 storage.AppendChatMessage 接进 FullHistorySink。
+		// 对话完整历史（含工具调用全过程）异步落 MySQL chat_messages，永不压缩，供回看/审计。
+		// 热轨仍是 Redis 会话记忆（可压缩），冷轨是 MySQL 逐字原文（永不压缩）——双轨分离。
+		agentEngine.SetFullHistorySink(chatMsgSink{})
+
 		handler.SetAgentEngine(agentEngine) // 注入 HTTP 对话接口使用
-		log.Println("✅ ReAct 引擎就绪，已装配 LLM/工具/Redis记忆(超长自动压缩)/权限校验")
+		log.Println("✅ ReAct 引擎就绪，已装配 LLM/工具/Redis记忆(超长自动压缩)/权限校验/冷轨完整历史")
 	}
 
 	// 8. 初始化 Gin 引擎（含全局中间件与路由）

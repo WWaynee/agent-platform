@@ -97,3 +97,17 @@ CREATE TABLE `tenant_tool_configs` (
   UNIQUE KEY `idx_tenant_tool` (`tenant_id`,`tool_name`),
   KEY `idx_tenant_tool_configs_tenant_id` (`tenant_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='租户工具权限';
+CREATE TABLE `chat_messages` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `tenant_id` bigint unsigned NOT NULL,
+  `user_id` bigint unsigned DEFAULT NULL COMMENT '发言/触发者用户ID',
+  `session_id` bigint unsigned NOT NULL COMMENT '会话ID（对应 sessions.id）',
+  `role` varchar(16) NOT NULL COMMENT 'user/assistant/tool',
+  `kind` varchar(16) NOT NULL COMMENT 'question/answer/tool_call/tool_result/system',
+  `content` text COMMENT '消息内容（原始全文或工具指令/结果，永不压缩）',
+  `trace_id` varchar(128) DEFAULT NULL COMMENT '该条消息生成的全链路traceId',
+  `created_at` datetime(3) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_chat_session` (`tenant_id`,`session_id`),
+  KEY `idx_chat_user` (`tenant_id`,`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对话消息完整历史表（冷轨：逐字原文，永不压缩，含工具调用全过程；供回看/审计）';

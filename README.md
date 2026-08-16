@@ -297,11 +297,15 @@
 > - 触发时机：每 `AddMessage` 后检查；阈值 / 保留轮数 / 结构见 `compressing.go` 常量。
 > - 自测：短对话不压缩 ✅；超长对话自动压缩（单测用注入 Summarizer 的 mock，另用真实 Redis+LLM 冒烟验证）✅；压缩后 token 下降 ✅；摘要失败降级 ✅。`go test ./agent/...` 全绿。
 
-> ⚠️ **已知设计取舍 / 待优化（暂记此，下一阶段复盘）**：
-> - **压缩是"覆盖式替代"**：当前 `CompressingMemory` 的写回走 `base.Clear()`（Redis 即 `DEL key`）+ 逐条 `RPUSH` 重建。即**被压缩掉的旧对话逐字原文从 Redis 被永久覆盖、不可回溯**（只剩摘要里的大意）。
-> - **影响**：若前端后续要**展示完整历史对话 / 做审计回看**，目前会拿到"压缩后的摘要 + 最近几轮"，拿不到被压掉的原始消息。
-> - **计划优化方向（双轨）**：分离存储——① 完整原文 `session:{tenant}:{sid}:messages`（永不压缩，供前端展示/审计）；② 喂模型的压缩副本（如 `session:{tenant}:{sid}:compressed`，超长时只刷新这份）。引擎读压缩版、前端读完整版，让"上下文不超窗"与"完整历史可回溯"兼得。
-> - 本轮**未改代码**，仅记录取舍，留待后续专门处理。
+> ✅ **已知设计取舍 / 待优化 → 已按需求单 0002「对话存储双轨分离」解决（2026-08-16）**：
+> - 旧问题（见下）：压缩走 `base.Clear()` + `RPUSH` 重建，**被压缩掉的旧对话逐字原文从 Redis 被永久覆盖、不可回溯**，前端拿不到完整对话原始历史。
+> - **方案（已落地）**：**双轨分离存储**——
+>   - **冷轨（MySQL `chat_messages`）**：**完整原文、永不压缩、永不过期**。每轮落库 `question / tool_call(工具名+参数JSON) / tool_result(检索片段全文) / answer` 各类消息（`role`+`kind` 区分），**含工具调用全过程**，供前端回看 / 审计。`GET /api/session/:id/messages` 改读这份完整历史（带租户+本人校验）。
+>   - **热轨（Redis `CompressingMemory`）**：仍只存"最终问答 + 工具**模板化摘要**"（`summarizeToolCall` 零额外 LLM 调用，以 user 角色写 `[工具] 工具名：…`），供下一轮 LLM 理解 + 参与超长自动压缩。模型视角不背工具原文、压缩不误伤。
+>   - **解耦注入**：`agent/engine/sink.go` 新增 `FullHistorySink` 最小接口 + `SetFullHistorySink(...)`，`cmd/api/main.go` 用 `chatMsgSink` adapter 把 `storage.AppendChatMessage` 接进来；不注入则冷轨静默关闭。写入**异步后台 goroutine**（`persistFullHistory`，基于 `AgentContext.ToContext` 派生独立 ctx 保留 trace_id/tenant_id/user_id），单条失败只 warn（对齐审计的"尽力而为"），不阻塞对话。
+>   - **类型统一 + 集中转换**：`ChatMsg.SessionID` 为 string（跟随 `AgentContext.SessionID`），adapter 内 `toStorageChatMessage`（经 `strconv.ParseUint`）统一转 uint64 落库；`ChatMsg` 不带 TraceID，trace_id 一律从传入的上下文取。
+> - 新增端到端脚本 `scripts/e2e_history_dual_track.sh`（完整历史含工具调用 + 热轨摘要 + 越权 403 回归）。
+> - 单测：`TestGetSessionMessagesReadsMySQL`（落库/读回/正序/kind/多租户隔离）、`TestSummarizeToolCall`（模板化摘要与截断、零 LLM）。`go vet ./...` / `go test ./...` / `go build ./...` 全绿。
 
 
 
@@ -644,7 +648,8 @@ agent-platform/
 │   │   ├── tool_permission.go #   工具权限校验 DBPermissionChecker（tenant_tool_config 白名单：显式关闭即拒，查不到默认放行）
 │   │   ├── tool_admin.go      #   工具开关配置（租户管理）：GetToolEnabled / UpdateToolEnabled（查不到默认启用）
 │   │   ├── session.go         #   会话业务：CreateSession(返回ID) / GetSessionList(只当前用户,更新时间倒序) / DeleteSession(软删DB+同步删Redis消息)
-│   │   │                      #   + GetSessionMessages(会话历史查询：带租户过滤+UserID本人校验，越权统一拒绝)
+│   │   │                      #   + GetSessionMessages(会话历史查询：带租户过滤+UserID本人校验，越权统一拒绝；
+│   │   │                      #     改读 MySQL chat_messages 冷轨完整原文，返回 {role,content,kind}，kind 区分 question/answer/tool_call/tool_result)
 │   │   ├── usage.go           #   Token 用量统计业务：实现 llmclient.UsageReporter 钩子（从 ctx 取租户/用户→Redis 累加）+ 当天/历史查询
 │   │   ├── quota.go           #   租户 Token 配额校验：CheckTenantTokenQuota（读 QuotaLlmToken + 当月 Redis 用量对比）
 │   │   ├── health.go          #   依赖健康检查：CheckMySQL/Redis/MinIO/Qdrant/RabbitMQ（各带超时）+ CheckAll 聚合(任一 down→unhealthy)
@@ -669,6 +674,7 @@ agent-platform/
 │   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / UpdateTaskRetry / GetTaskByID / ListTasks(分页)
 │   ├── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / ListToolConfigs / UpdateToolConfig / InitDefaultToolConfigs）
 │   ├── audit.go               #   审计日志存储：CreateAuditLog（写 audit_logs 表，FromCtx 取上下文）
+│   ├── chat_message.go        #   对话消息完整历史(冷轨)存储：AppendChatMessage / ListChatMessagesBySession(带租户过滤,正序)
 │   └── ratelimit.go / usage.go#   Redis 限流与用量统计存储：AllowRequest(滑动窗口 Lua) + AddUsage/GetDayUsage/GetMonthUsage/GetRangeUsage
 │
 ├── splitter/                  # 文档切片策略（ChunkSize=600 / OverlapSize=80 常量 + 策略说明）
@@ -694,6 +700,9 @@ agent-platform/
 │   │   └── context.go           #   标准 ctx 透传：WithTraceID/TraceIDFromCtx + WithTenantUser/TenantIDFromCtx/UserIDFromCtx
 │   ├── engine/                  #   ReAct 引擎（调度核心）
 │   │   │                       #     engine.go: 主循环 Run(拿历史→拼Prompt→调LLM→解析→执行工具→持久化)
+│   │   │                       #     sink.go: 冷轨完整历史写入接口 FullHistorySink + ChatMsg + SetFullHistorySink(可关闭)
+│   │   │                       #     summarize_tool.go: 工具调用模板化摘要 summarizeToolCall(零额外LLM, [工具] 工具名：结论, 截断80字)
+│   │   │                       #     （persist 双轨: ①热轨 Memory 最终问答+工具摘要 ②冷轨异步落 MySQL chat_messages）
 │   │   │                       #     prompt.go: 动态拼装 SystemPrompt(角色+工具列表+JSON格式)
 │   │   │                       #     parser.go: 多层容错解析 LLM 输出为 {action,action_input}
 │   │   │                       #     llm_adapter.go: engine.Message ↔ llmclient.ChatMessage 适配

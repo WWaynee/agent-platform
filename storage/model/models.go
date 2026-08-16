@@ -92,6 +92,21 @@ type TenantToolConfig struct {
 	UpdatedAt time.Time
 }
 
+// chat_message 对话消息完整历史表（冷轨：逐字原文，永不压缩、永不过期；含工具调用指令与执行结果，供回看/审计）。
+// 与热轨（Redis 会话记忆，可能被压缩覆盖）区分：这里是"逐字原文"持久落点。
+// SessionID 为该会话在 sessions 表的主键 ID（对应引擎侧 AgentContext.SessionID 的十进制字符串）。
+type ChatMessage struct {
+	ID        uint64 `gorm:"primaryKey"`
+	TenantID  uint64 `gorm:"index:idx_chat_session;not null"`
+	UserID    uint64 `gorm:"index:idx_chat_user;comment:发言/触发者用户ID"`
+	SessionID uint64 `gorm:"index:idx_chat_session;not null;comment:会话ID（对应 sessions.id）"`
+	Role      string `gorm:"size:16;not null;comment:user/assistant/tool"`
+	Kind      string `gorm:"size:16;not null;comment:question/answer/tool_call/tool_result/system"`
+	Content   string `gorm:"type:text;comment:消息内容（原始全文或工具指令/结果，永不压缩）"`
+	TraceID   string `gorm:"size:128;comment:该条消息生成的全链路traceId"`
+	CreatedAt time.Time
+}
+
 // 获取全部模型，用于自动迁移
 func AllModels() []interface{} {
 	return []interface{}{
@@ -102,5 +117,6 @@ func AllModels() []interface{} {
 		&Session{},
 		&AuditLog{},
 		&TenantToolConfig{},
+		&ChatMessage{},
 	}
 }
