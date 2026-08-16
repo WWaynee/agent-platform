@@ -39,6 +39,7 @@ type Document struct {
 	MinioObjectKey string `gorm:"size:512;not null;comment:minio存储key"`
 	Status         string `gorm:"size:32;not null;comment:pending/processing/success/fail"`
 	ErrorMsg       string `gorm:"type:text;comment:失败原因（仅 failed 状态时记录）"`
+	Summary        string `gorm:"type:text;comment:文档摘要（可选：向量化成功后由 LLM 预生成，用于 list_documents 帮 LLM 选文档）"`
 	Size           int64  `gorm:"comment:文件字节大小"`
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

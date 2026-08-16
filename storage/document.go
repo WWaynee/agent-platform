@@ -16,6 +16,64 @@ import (
 // ⚠️ 多租户关键约束：所有查询一律带 tenant_id 租户过滤，
 // 绝不允许只按 ID 查询，否则会跨租户越权访问他人文档。
 
+// ============ Storage 层：读全文 & 按名称搜索（get_document_content / search_documents / list_documents 用） ============
+
+// DocumentText 某篇文档的全文内容（供 get_document_content 工具读取）。
+//   - DocumentID:   文档 ID
+//   - DocumentName: 文档名称（返回给 LLM 便于引用来源）
+//   - Content:      全文原始文本（未截断；截断由工具层按字符上限负责）
+//   - TotalChars:   原始总字符数（工具层据此判断是否超限并给出"已截断"提示）
+type DocumentText struct {
+	DocumentID   uint64
+	DocumentName string
+	Content      string
+	TotalChars   int
+}
+
+// ReadDocumentContent 带租户过滤读取某篇文档的完整文本（供 get_document_content 工具）。
+//  1. 先从 documents 表带 tenant_id 过滤取出文档（防跨租户越权读取）
+//  2. 用 MinIO object key 下载对象并转为 UTF-8 文本返回
+//
+// ⚠️ 说明：能成功进入知识库的文档必然是 .txt/.md（ProcessDocument 的 ReadTextDocument 只放行这两种扩展名），
+// 故此处直接 string(data) 转文本，无需重复扩展名校验。
+// 多租户：tenant_id 强制过滤，绝不允许只按 documentID 读取他人文档。
+func ReadDocumentContent(ctx context.Context, tenantID, documentID uint64) (*DocumentText, error) {
+	doc, err := GetDocumentByID(ctx, tenantID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := DownloadFile(doc.MinioObjectKey)
+	if err != nil {
+		return nil, err
+	}
+	content := string(data)
+	return &DocumentText{
+		DocumentID:   doc.ID,
+		DocumentName: doc.Name,
+		Content:      content,
+		TotalChars:   len([]rune(content)),
+	}, nil
+}
+
+// SearchDocuments 按文档名模糊搜索（name LIKE %keyword%），强制 tenant_id 过滤、排除软删。
+// 返回当前租户中名称含 keyword 的文档（按更新时间倒序）。
+//   - keyword 为空：返回该租户全部文档（等价不分页全量，供 list_documents 用）
+//   - GORM 参数化 LIKE：天然防注入（特殊字符 %/_ 作为字面量处理）
+//
+// 供 search_documents 工具（文档多时按名称精确检索）与 list_documents 工具（全量列表）使用。
+func SearchDocuments(ctx context.Context, tenantID uint64, keyword string) ([]model.Document, error) {
+	query := DB.WithContext(ctx).Where("tenant_id = ?", tenantID)
+	if keyword != "" {
+		// 参数化 LIKE，天然防注入
+		query = query.Where("name LIKE ?", "%"+keyword+"%")
+	}
+	var list []model.Document
+	if err := query.Order("updated_at DESC").Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
 // CreateDocument 插入一条文档记录
 func CreateDocument(ctx context.Context, doc *model.Document) error {
 	return DB.WithContext(ctx).Create(doc).Error
@@ -70,6 +128,15 @@ func ListDocuments(ctx context.Context, tenantID uint64, page, pageSize int) ([]
 // Document 模型带 gorm.DeletedAt，Delete 会自动转成软删除（写入 deleted_at 时间戳）
 func DeleteDocument(ctx context.Context, tenantID, id uint64) error {
 	return DB.WithContext(ctx).Where("id = ? AND tenant_id = ?", id, tenantID).Delete(&model.Document{}).Error
+}
+
+// UpdateDocumentSummary 更新文档摘要（documents.summary 列）。
+// 供 ProcessDocument 向量化成功后生成的 LLM 摘要落库（尽力而为，失败不影响主流程 success）。
+// 带租户过滤更新，防止跨租户覆盖他人文档摘要。
+func UpdateDocumentSummary(ctx context.Context, tenantID, id uint64, summary string) error {
+	return DB.WithContext(ctx).Model(&model.Document{}).
+		Where("id = ? AND tenant_id = ?", id, tenantID).
+		Update("summary", summary).Error
 }
 
 // UpdateDocumentStatus 仅更新文档状态

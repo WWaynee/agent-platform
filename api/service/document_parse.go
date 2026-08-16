@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"agent-platform/config"
 	"agent-platform/llmclient"
+	"agent-platform/observability"
 	"agent-platform/splitter"
 	"agent-platform/storage"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -253,12 +256,13 @@ func ProcessDocument(ctx context.Context, tenantID, documentID uint64) error {
 	points := make([]storage.QdrantVector, 0, len(chunks))
 	for i, chunk := range chunks {
 		points = append(points, storage.QdrantVector{
-			ID:         composePointID(documentID, i), // 点全局唯一
-			TenantID:   tenantID,
-			DocumentID: documentID,
-			ChunkIndex: i,
-			Content:    chunk,
-			Vector:     vectors[i],
+			ID:           composePointID(documentID, i), // 点全局唯一
+			TenantID:     tenantID,
+			DocumentID:   documentID,
+			DocumentName: doc.Name, // 文档名：检索命中时随结果返回，LLM 据此引用来源
+			ChunkIndex:   i,
+			Content:      chunk,
+			Vector:       vectors[i],
 		})
 	}
 	if err := storage.UpsertVectors(ctx, points); err != nil {
@@ -269,7 +273,83 @@ func ProcessDocument(ctx context.Context, tenantID, documentID uint64) error {
 	if err := storage.UpdateDocumentResult(ctx, documentID, "success", ""); err != nil {
 		return fmt.Errorf("更新文档状态失败: %w", err)
 	}
+
+	// 7.（可选项）成功后再预生成文档摘要落库，供 list_documents 帮 LLM 选文档。
+	//    尽力而为：生成/落库任何一步失败都只记日志，不改变主流程的 success 状态。
+	generateAndStoreSummary(ctx, tenantID, documentID, doc.Name, text)
+
 	return nil
+}
+
+// ============ 文档摘要预生成（可选项：阶段2(6)） ============
+
+// summaryMaxChars 摘要最长字符数。摘要主要用于 list_documents 帮 LLM 快速判断文档内容价值，
+// 过长反而占用上下文；取 300 字符足够承载 3~5 句核心摘要。
+const summaryMaxChars = 300
+
+// summaryInputChars 送入 LLM 用于生成摘要的正文上限。
+// 生成摘要只需把握文档主题与关键内容，不必读全文；取正文前 6000 字符足够，
+// 避免超大文档把大量 token 花在摘要这一步。
+const summaryInputChars = 6000
+
+// generateAndStoreSummary 向量化成功后调用 LLM 为文档生成摘要并落库 documents.summary。
+// 设计要点：
+//   - 仅取正文前 summaryInputChars 字符喂给 LLM，控制摘要成本；
+//   - 摘要结果按 summaryMaxChars 截断，避免过长；
+//   - 全程"尽力而为"：Chat 或落库失败只记 error 日志并直接返回，绝不阻塞向量化主流程的 success 状态。
+//
+// 日志规范：用 observability.WithContext(ctx) 取带 trace_id/tenant_id 的 logger，
+// 错误走 logger.Error(msg, err, ...)，耗时字段统一用 observability.FieldLatency。
+func generateAndStoreSummary(ctx context.Context, tenantID, documentID uint64, docName, text string) {
+	logger := observability.WithContext(ctx)
+	start := time.Now()
+
+	// 只取正文前 summaryInputChars 字符喂给 LLM（中文按 rune 截，不切半个字）
+	src := []rune(text)
+	if len(src) > summaryInputChars {
+		src = src[:summaryInputChars]
+	}
+	srcRunes := string(src)
+
+	llm := llmclient.NewClient(config.GlobalConfig.LLM)
+	resp, err := llm.Chat(ctx, llmclient.ChatRequest{
+		Messages: []llmclient.ChatMessage{
+			{Role: llmclient.RoleSystem, Content: "你是一个为企业知识库文档生成摘要的助手。基于提供的文档正文，用简洁通顺的中文生成 3~5 句核心摘要，涵盖文档主题、主要内容与用途。只输出摘要本身，不要标题、不要多余解释。"},
+			{Role: llmclient.RoleUser, Content: fmt.Sprintf("文档名称：《%s》\n文档正文（摘要片段）：\n%s", docName, srcRunes)},
+		},
+		Temperature: 0.3,
+	})
+	if err != nil {
+		logger.Error("文档摘要生成失败",
+			zap.Uint64("document_id", documentID),
+			zap.Error(err))
+		return
+	}
+
+	summary := strings.TrimSpace(resp.Content)
+	// 空摘要或纯空白视为生成失败，静默返回（不落库）
+	if summary == "" {
+		logger.Warn("文档摘要为空，跳过落库", zap.Uint64("document_id", documentID))
+		return
+	}
+	// 按 summaryMaxChars 截断，避免摘要过长占上下文
+	if rs := []rune(summary); len(rs) > summaryMaxChars {
+		summary = string(rs[:summaryMaxChars])
+	}
+
+	// 带租户过滤落库（防跨租户覆盖），失败只记日志不阻塞主流程
+	if err := storage.UpdateDocumentSummary(ctx, tenantID, documentID, summary); err != nil {
+		logger.Error("文档摘要落库失败",
+			zap.Uint64("document_id", documentID),
+			zap.Error(err))
+		return
+	}
+
+	logger.Info("文档摘要已生成",
+		zap.Uint64("document_id", documentID),
+		zap.Int("summary_chars", len([]rune(summary))),
+		zap.Int64(observability.FieldLatency, time.Since(start).Milliseconds()),
+	)
 }
 
 // composePointID 合成一个向量点的全局唯一 ID。

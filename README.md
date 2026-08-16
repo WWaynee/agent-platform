@@ -16,6 +16,7 @@
 
 - 自然语言提问企业内部问题
 - AI 自动检索本企业知识库辅助回答
+- **文档级智能检索**：可按 `document_ids` 限定在某几个文档里检索；检索结果携带来源文档名称，支持"对比文档 A 与 B / 总结整篇《xxx》"等整文档级问答（名称→ID 解析：`list_documents` / `search_documents` 匹配名称得 ID → `knowledge_retrieve` 限定检索 → 必要时 `get_document_content` 读全文）
 - 支持多轮连续对话，AI 保留上下文
 - 大型文档后台异步处理，无需等待
 
@@ -669,7 +670,7 @@ agent-platform/
 │   ├── qdrant.go              #   Qdrant 向量库封装：批量入库 UpsertVectors + 多租户检索 SearchVectors
 │   ├── model/models.go        #   GORM 模型（全核心表的实体定义）
 │   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
-│   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）
+│   ├── document.go            #   文档 CRUD（强制 tenant_id 过滤）+ SearchDocuments（名称LIKE/租户过滤/排除软删）+ ReadDocumentContent（带租户过滤读 MinIO 全文）
 │   ├── session.go             #   会话 CRUD：CreateSession / GetSessionByID / ListSessions(分页+租户+用户过滤,更新时间倒序) / DeleteSession(软删)
 │   ├── task.go                #   异步任务 CRUD（强制 tenant_id 过滤）：CreateTask / UpdateTaskStatus / UpdateTaskRetry / GetTaskByID / ListTasks(分页)
 │   ├── tool_config.go         #   租户工具权限配置 CRUD（GetToolConfig / ListToolConfigs / UpdateToolConfig / InitDefaultToolConfigs）
@@ -731,7 +732,10 @@ agent-platform/
 │   └── .gitkeep
 ├── toolkit/                    # 可插拔工具集（Agent 调用能力注入）
 │   ├── echo_tool.go            #   Echo 测试工具（骨架链路验证）
-│   └── knowledge_retrieve.go   #   知识库检索工具（RAG 核心，调 service.Search，按 ctx.TenantID 隔离）
+│   ├── knowledge_retrieve.go   #   知识库检索工具（RAG 核心，调 service.Search 按 ctx.TenantID 隔离；支持可选 document_ids 限定文档检索 + 返回 document_name/document_id/chunk_index）
+│   ├── list_documents.go       #   文档列表工具（返回当前租户文档 id/name/size/status，上限50篇，带摘要）
+│   ├── search_documents.go     #   文档名称搜索工具（LIKE 模糊搜索名称含关键字，上限20篇，名称→ID 解析的 B 路径）
+│   └── get_document_content.go #   文档全文读取工具（读整篇全文，按 MaxDocumentChars=8000 字符截断 + 超长优先展示已生成摘要）
 ├── observability/             # 可观测体系（结构化 JSON 日志唯一出入口 + Prometheus 指标，第二周周四）
 │   ├── logger.go              #   日志封装：JSON 结构化 + 字段常量(FieldTraceID/FieldTenantID/FieldUserID/FieldLatency/FieldError)
 │   │                          #   + WithContext(ctx 自动注入 trace/tenant/user 字段) / WithAgentContext(Agent 链路) / WithTenantUser

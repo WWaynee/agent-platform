@@ -98,10 +98,21 @@ func main() {
 	log.Printf("✅ RabbitMQ 连接成功 (vhost=%s, queue=%s)",
 		cfg.RabbitMQ.Vhost, cfg.RabbitMQ.QueueName)
 
-	// 6. 初始化工具管理器：注册知识库检索工具 + 注入基于 DB 的工具权限校验
+	// 6. 初始化工具管理器：注册知识库检索工具 + 文档级检索工具（列表/名称搜索/读全文）+ 注入基于 DB 的工具权限校验
 	tm := toolmanager.NewToolManager()
 	if err := tm.RegisterTool(toolkit.NewKnowledgeRetrieveTool()); err != nil {
 		log.Fatalf("注册知识库检索工具失败: %v", err)
+	}
+	// 文档维度检索工具（需求单0003）：让 LLM 先知道有哪些文档、按名称拿 ID，再限定文档检索 / 读全文。
+	// 三个工具都经 ToolManager 统一执行，天然过 DBPermissionChecker（查不到默认放行，老租户不误拦截）。
+	if err := tm.RegisterTool(toolkit.NewListDocumentsTool()); err != nil {
+		log.Fatalf("注册文档列表工具失败: %v", err)
+	}
+	if err := tm.RegisterTool(toolkit.NewSearchDocumentsTool()); err != nil {
+		log.Fatalf("注册文档名称搜索工具失败: %v", err)
+	}
+	if err := tm.RegisterTool(toolkit.NewGetDocumentContentTool()); err != nil {
+		log.Fatalf("注册文档全文读取工具失败: %v", err)
 	}
 	// 注入 tenant_tool_config 白名单权限校验（未显式开启的工具会被拦截）
 	tm.SetPermissionChecker(service.NewDBPermissionChecker())

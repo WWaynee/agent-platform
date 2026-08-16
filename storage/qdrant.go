@@ -93,16 +93,17 @@ func ensureCollection(ctx context.Context, name string, vectorSize uint64) error
 // 且 tenant_id 是检索过滤键，缺失会导致数据能被他租户检索到（安全事故）。
 // Content 直接落 payload，检索时随结果返回，无需再回查数据库。
 type QdrantVector struct {
-	ID         uint64    // 点全局唯一 ID（建议用 document_id<<32 | chunk_index 合成，防跨文档冲突）
-	TenantID   uint64    // 租户 ID（检索过滤键）
-	DocumentID uint64    // 文档 ID（归属的文档）
-	ChunkIndex int       // 第几个切片（从 0 开始）
-	Content    string    // 切片原文内容（检索结果直接携带）
-	Vector     []float32 // 向量（如 Qwen/Qwen3-VL-Embedding-8B = 4096 维）
+	ID           uint64    // 点全局唯一 ID（建议用 document_id<<32 | chunk_index 合成，防跨文档冲突）
+	TenantID     uint64    // 租户 ID（检索过滤键）
+	DocumentID   uint64    // 文档 ID（归属的文档）
+	DocumentName string    // 文档名称（检索结果随命中返回，LLM 据此引用来源）
+	ChunkIndex   int       // 第几个切片（从 0 开始）
+	Content      string    // 切片原文内容（检索结果直接携带）
+	Vector       []float32 // 向量（如 Qwen/Qwen3-VL-Embedding-8B = 4096 维）
 }
 
 // toPointStruct 把业务层的 QdrantVector 转成 Qdrant 的 PointStruct（含 payload）。
-// payload 蕴含 tenant_id/document_id/chunk_index/content 四个必填元数据。
+// payload 蕴含 tenant_id/document_id/document_name/chunk_index/content 五个必填元数据。
 func toPointStruct(v QdrantVector) (*qdrant.PointStruct, error) {
 	payload := map[string]*qdrant.Value{}
 	for key, val := range map[string]int64{
@@ -121,6 +122,13 @@ func toPointStruct(v QdrantVector) (*qdrant.PointStruct, error) {
 		return nil, fmt.Errorf("构造 payload 字段 content 失败: %w", err)
 	}
 	payload["content"] = contentVal
+
+	// 文档名称（文本）：检索命中时随结果返回，LLM 据此引用来源（"根据《xxx》…"）
+	nameVal, err := qdrant.NewValue(v.DocumentName)
+	if err != nil {
+		return nil, fmt.Errorf("构造 payload 字段 document_name 失败: %w", err)
+	}
+	payload["document_name"] = nameVal
 
 	return &qdrant.PointStruct{
 		Id:      qdrant.NewIDNum(v.ID),
@@ -174,24 +182,55 @@ type QdrantSearchHit struct {
 	Payload map[string]interface{}
 }
 
-// tenantIDFilter 构造"tenant_id 等值匹配"的过滤条件。
+// tenantIDFilter 构造"tenant_id 等值匹配"的过滤条件（仅租户维度，不做文档过滤）。
 // ⚠️ 供检索强制使用——把过滤条件写死在这里，业务层传进来也不信，杜绝跨租户泄漏。
-// 用整数 Match_Integer 精确匹配（tenant_id 是 int 类型 payload）。
+// 它是 searchFilter(tenantID, nil) 的等价简写（不限定文档 = 全租户检索）。
 func tenantIDFilter(tenantID uint64) *qdrant.Filter {
-	return &qdrant.Filter{
-		Must: []*qdrant.Condition{
-			{
-				ConditionOneOf: &qdrant.Condition_Field{
-					Field: &qdrant.FieldCondition{
-						Key: "tenant_id",
-						Match: &qdrant.Match{
-							MatchValue: &qdrant.Match_Integer{Integer: int64(tenantID)},
-						},
+	return searchFilter(tenantID, nil)
+}
+
+// searchFilter 构造检索过滤条件：强制 tenant_id 等值匹配 + 可选的 document_id in 过滤。
+// ⚠️ 多租户隔离底线不因 documentIDs 削弱：
+//   - tenant_id 过滤始终作为 Must 条件由本函数内部构造（即使业务层传错也兜住跨租户泄漏）；
+//   - document_ids 只是在其上再叠加"只在这些文档里查"（document_id in [...]），收敛范围而非打开范围。
+//
+// documentIDs 为空时不叠加 document 过滤（= 全租户检索，等价 tenantIDFilter）。
+func searchFilter(tenantID uint64, documentIDs []uint64) *qdrant.Filter {
+	// 先以 tenant_id 过滤为基底（隔离底线）
+	conditions := []*qdrant.Condition{
+		{
+			ConditionOneOf: &qdrant.Condition_Field{
+				Field: &qdrant.FieldCondition{
+					Key: "tenant_id",
+					Match: &qdrant.Match{
+						MatchValue: &qdrant.Match_Integer{Integer: int64(tenantID)},
 					},
 				},
 			},
 		},
 	}
+
+	// 若传了 document_ids，再叠加 document_id in [...]（整型"in 列表"匹配）
+	if len(documentIDs) > 0 {
+		ids := make([]int64, 0, len(documentIDs))
+		for _, id := range documentIDs {
+			ids = append(ids, int64(id))
+		}
+		conditions = append(conditions, &qdrant.Condition{
+			ConditionOneOf: &qdrant.Condition_Field{
+				Field: &qdrant.FieldCondition{
+					Key: "document_id",
+					Match: &qdrant.Match{
+						MatchValue: &qdrant.Match_Integers{
+							Integers: &qdrant.RepeatedIntegers{Integers: ids},
+						},
+					},
+				},
+			},
+		}) // document_id in [1,2,3]
+	}
+
+	return &qdrant.Filter{Must: conditions}
 }
 
 // SearchVectors 查询与 query 向量最相似的 topK 个点，返回内容列表与相似度分数。
@@ -202,7 +241,14 @@ func tenantIDFilter(tenantID uint64) *qdrant.Filter {
 //
 // 返回按相似度降序排列的 {Content, Score}。Content 直接取自 payload（写入时冗余存储），
 // 检索后无需再查数据库取原文，降低 RAG 检索环节的延迟与依赖。
-func SearchVectors(ctx context.Context, query []float32, tenantID uint64, topK int) ([]QdrantSearchHit, error) {
+//
+// documentIDs 为可选可变参数（...uint64）：用于在强制 tenant_id 过滤之上进一步'只在
+// 指定的某几篇文档里检索'（document_id in [...]）。
+//   - 不传 → 当前租户全部文档里检索（兼容老逻辑）；
+//   - 传了 → 叠加 document_id in [id...] 过滤（in 列表匹配）。
+//   - ⚠️ 隔离底线不变：tenant_id 过滤始终由本函数内部强制构造（业务层传进来也不信），
+//     document_ids 只是在其上进一步收敛范围，绝不削弱跨租户隔离。
+func SearchVectors(ctx context.Context, query []float32, tenantID uint64, topK int, documentIDs ...uint64) ([]QdrantSearchHit, error) {
 	collection := config.GlobalConfig.Qdrant.CollectionName
 
 	limit := uint64(topK)
@@ -211,8 +257,8 @@ func SearchVectors(ctx context.Context, query []float32, tenantID uint64, topK i
 		// 构造 query：dense 查询向量
 		Query: qdrant.NewQueryNearest(qdrant.NewVectorInput(query...)),
 		Limit: &limit,
-		// ⚠️ 强制 tenant_id 过滤：只有当前租户的向量会被检索
-		Filter: tenantIDFilter(tenantID),
+		// ⚠️ 强制 tenant_id 过滤 + 可选 document_id in 过滤：只有当前租户（且属于指定文档）的向量会被检索
+		Filter: searchFilter(tenantID, documentIDs),
 		// 检索需带回 payload（content/document_id/chunk_index 等）
 		WithPayload: qdrant.NewWithPayload(true),
 		// 不返回向量，只带 payload（节省带宽；业务只用 payload 里的元数据）

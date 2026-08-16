@@ -34,6 +34,7 @@ CREATE TABLE `documents` (
   `minio_object_key` varchar(512) NOT NULL,
   `status` varchar(32) NOT NULL COMMENT 'pending/processing/success/fail',
   `error_msg` text COMMENT '失败原因（仅 failed 状态时记录）',
+  `summary` text COMMENT '文档摘要（向量化成功后由 LLM 预生成，可选；供 list_documents 帮 LLM 选文档、get_document_content 超长时优先返回）',
   `size` bigint DEFAULT NULL,
   `created_at` datetime(3) DEFAULT NULL,
   `updated_at` datetime(3) DEFAULT NULL,

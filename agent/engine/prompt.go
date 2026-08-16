@@ -72,8 +72,65 @@ func BuildSystemPrompt(systemRole string, tools []toolmanager.Tool) string {
 	b.WriteString("3. 如果不知道答案，请如实说'我不知道'，绝不编造不存在的知识或数据。\n")
 	b.WriteString("4. action_input 中的参数必须是合法的 JSON 字符串（键值对用双引号）。\n")
 	b.WriteString("5. 你的回答应基于检索到的知识库内容，引用时可指明来源，但不要声称访问过外部网站。\n")
+	b.WriteString("\n")
+
+	// 6. 文档维度检索指引（仅在对应文档检索工具已注册时追加，保证 Prompt 与实际工具一致）
+	appendDocumentRetrieveGuide(&b, tools)
 
 	return b.String()
+}
+
+// appendDocumentRetrieveGuide 追加"文档维度检索 / 多文档问题"的操作指引。
+// 仅当 [list_documents / search_documents / get_document_content] 已注册时才写入对应段落，
+// 避免提示词引导 LLM 调用一个未注册的工具。
+//
+// 目的（需求单0003）：让 LLM 面对"整文档级 / 多文档对比"问题时，先"知道有哪些文档 → 拿文档ID →
+// 限定 document_ids 检索 / 必要时读全文"，而非盲目在全租户片段里搜。
+func appendDocumentRetrieveGuide(b *strings.Builder, tools []toolmanager.Tool) {
+	has := make(map[string]bool)
+	for _, t := range tools {
+		has[t.Name()] = true
+	}
+
+	// 仅当已具备"文档识别+限定检索"能力（list_documents 或 search_documents）时才写完整指引，
+	// 避免提示词引导 LLM 调用一个未注册的工具。
+	if !has["list_documents"] && !has["search_documents"] {
+		return
+	}
+
+	b.WriteString("五、文档维度检索规则：\n")
+	// 1. 用户提到具体文档名 → 先拿 ID，再限定检索
+	b.WriteString("1. 当用户提到具体文档名称时（如'合同A'、'产品文档'、'员工手册'）：\n")
+	b.WriteString("   a. 先用 list_documents（文档不多时）或 search_documents（文档多、需按名称搜时）拿到文档 ID；\n")
+	if has["knowledge_retrieve"] {
+		b.WriteString("   b. 再调 knowledge_retrieve 并传 document_ids 参数，限定只在相关文档里检索，减少噪声；\n")
+	}
+	b.WriteString("   c. 若你已在当前会话中调过 list_documents 且已得知文档列表，不要重复调用它——直接用已知的文档 ID 走 knowledge_retrieve；仅当你确实不知道某个文档 ID 时才重新查。\n")
+	// 2. 匹配不到/匹配多个
+	b.WriteString("2. 若用户提到的文档名匹配不到或匹配到多个：不要瞎猜、不要编造文档 ID；主动列出相近的文档（id+name）请用户确认'你指的是哪个？'；或在确实能覆盖时，不带 document_ids 全量检索。\n")
+	// 3. 用户未提具体文档
+	b.WriteString("3. 若用户未提具体文档（如'付款条款一般怎么写'）：可直接全量检索（不传 document_ids），或基于通用知识回答，不强求匹配文档。\n")
+	// 4. get_document_content 使用边界
+	if has["get_document_content"] {
+		b.WriteString("4. get_document_content 仅用于以下情形，不要动不动就读全文：\n")
+		b.WriteString("   a. 需要整篇文档的总结/核心观点提炼（如'总结文档A'）；b. 需完整上下文才能回答、片段不足以支撑；c. knowledge_retrieve 多次检索仍信息不足。\n")
+		b.WriteString("   普通事实类问题（'某条款是什么'）优先用 knowledge_retrieve 精确检索，不要直接读全文。\n")
+	} else {
+		b.WriteString("4. 若需完整上下文，先以 knowledge_retrieve 多次精确检索覆盖各角度，而不是直接读全文。\n")
+	}
+	// 5. 引用来源 / 多文档区分
+	b.WriteString("5. 回答中若引用文档内容，注明来源文档名称（如'根据《产品需求文档v2.0》……'）；多文档对比时分别标注各文档观点，不要混为一谈。\n")
+	// 6. 文档多时优先 search
+	if has["search_documents"] {
+		b.WriteString("6. 文档多（list_documents 提示已超上限）时，优先用 search_documents 按名称精确搜索，不要依赖 list_documents 的全量列表。\n")
+	}
+	b.WriteString("--------\n")
+
+	// 多文档对比/集成推理正例：先拿两份文档 ID → 限定 document_ids 分别检索 → 综合对比
+	b.WriteString("多文档对比示例（问题：'对比《采购合同》与《销售合同A》在付款条款上的区别'）：\n")
+	b.WriteString("先 list_documents（或 search_documents '合同'）拿到 采购合同(id=1)、销售合同A(id=2)；\n")
+	b.WriteString("再 knowledge_retrieve {\"query\": \"付款条款\", \"document_ids\": [1,2]} 拿两篇的付款条款片段；\n")
+	b.WriteString("观察返回片段综合对比，回答时分别标注'采购合同里说……销售合同A里说……'。\n")
 }
 
 // systemMessageFor 根据工具列表构造 engine 侧的 system 消息。

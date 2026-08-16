@@ -19,15 +19,16 @@ import (
 
 // SearchRequest 知识库检索请求（JSON body）
 type SearchRequest struct {
-	Query string `json:"query" binding:"required,min=1,max=500"` // 查询文本（必填，长度 1~500）
-	TopK  int    `json:"top_k"`                                  // 期望返回的片段条数；<=0 时服务层默认取 3
+	Query       string   `json:"query" binding:"required,min=1,max=500"` // 查询文本（必填，长度 1~500）
+	TopK        int      `json:"top_k"`                                  // 期望返回的片段条数；<=0 时服务层默认取 3
+	DocumentIDs []uint64 `json:"document_ids"`                           // 可选：只在指定文档里检索（document_id in [...]; top_k/document_ids 边界由 service.Search 统一收敛）
 }
 
 // KnowledgeSearch 知识库检索
 // POST /api/knowledge/search
 //
-// 请求体：{"query": "问题", "top_k": 3}
-// 返回：命中的文档片段列表（content / score / document_id / chunk_index）
+// 请求体：{"query": "问题", "top_k": 3, "document_ids": [1,2]}
+// 返回：命中的文档片段列表（content / score / document_id / document_name / chunk_index）
 func KnowledgeSearch(c *gin.Context) {
 	// 1. 从 JWT 上下文拿当前租户（唯一可信来源）
 	tenantID := middleware.GetTenantID(c)
@@ -44,7 +45,7 @@ func KnowledgeSearch(c *gin.Context) {
 	}
 
 	// 3. 调用检索 service（透传请求级 ctx，使向量化/检索日志带同一 trace_id）
-	hits, err := service.Search(c.Request.Context(), tenantID, req.Query, req.TopK)
+	hits, err := service.Search(c.Request.Context(), tenantID, req.Query, req.TopK, req.DocumentIDs...)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return

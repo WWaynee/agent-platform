@@ -28,8 +28,14 @@ import (
 // DefaultTools 新建租户时默认开启的工具集合。
 // 用于 InitDefaultToolConfigs：新租户创建时把这些默认工具显式写为开启记录，
 // 便于管理员在管理端看到并管理这些工具的开关状态。
+//
+// 需求单0003 新增的三个文档级检索工具默认开启（list_documents / search_documents / get_document_content）。
+// ⚠️ 老租户不受影响：DBPermissionChecker 对"查不到配置的工具"默认放行，不会误拦截新工具。
 var DefaultTools = []string{
 	"knowledge_retrieve",
+	"list_documents",
+	"search_documents",
+	"get_document_content",
 }
 
 // GetToolConfig 查询某租户对某工具"是否开启"的配置。
