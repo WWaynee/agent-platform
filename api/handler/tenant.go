@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"agent-platform/api/middleware"
 	"agent-platform/api/response"
 	"agent-platform/api/service"
 	"agent-platform/api/validator"
@@ -82,10 +83,19 @@ func CreateTenant(c *gin.Context) {
 }
 
 // GetTenantDetail 租户详情
+// ⚠️ 多租户隔离（本次补强）：只能查「当前登录用户所属的租户」，路径 id 必须等于 JWT 的 tenant_id，
+//    否则返回"租户不存在"（不区分"不存在"与"无权"，防横向探测 / 防枚举其它租户）。
 func GetTenantDetail(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		response.BadRequest(c, "无效的租户 ID")
+		return
+	}
+
+	// 归属校验：只能查当前租户
+	tenantID := middleware.GetTenantID(c)
+	if tenantID == 0 || id != tenantID {
+		response.BadRequest(c, "租户不存在")
 		return
 	}
 

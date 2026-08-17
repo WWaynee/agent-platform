@@ -45,3 +45,16 @@ func GetUserByID(ctx context.Context, id uint64) (*model.User, error) {
 	}
 	return &user, nil
 }
+
+// FindUsersByUsername 按用户名全库查询（需求单 0004：纯用户名登录用）。
+// 同一用户名在不同租户下可共存（users.idx_tenant_user 联合唯一），
+// 故可能命中多个用户；由 service 层判断唯一性并决定登录或报"同名冲突"。
+// 按 tenant_id 升序返回，保证"多租户同名"时结果顺序稳定。
+func FindUsersByUsername(ctx context.Context, username string) ([]model.User, error) {
+	var users []model.User
+	err := DB.WithContext(ctx).Where("username = ?", username).Order("tenant_id ASC").Find(&users).Error
+	if err != nil {
+		return nil, err
+	}
+	return users, nil
+}

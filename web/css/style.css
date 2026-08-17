@@ -1,0 +1,41 @@
+/* ============ 多租户智能 Agent 工作台 - 自定义样式 ============ */
+/* 少量补充 Tailwind 未覆盖的样式：滚动条 / 输入框 / 分页 */
+
+/* 输入框基础样式（配合 Tailwind 使用） */
+.input-field {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  background: white;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input-field:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+/* 自定义细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* tab 按钮非激活态柔化 */
+.tab-btn {
+  transition: all 0.15s ease;
+}
+
+/* 会话项删除按钮出现效果由 group-hover 控制（已在 HTML） */

@@ -22,7 +22,8 @@ type User struct {
 	ID           uint64 `gorm:"primaryKey"`
 	TenantID     uint64 `gorm:"uniqueIndex:idx_tenant_user;not null;comment:租户ID"`
 	Username     string `gorm:"size:64;not null;uniqueIndex:idx_tenant_user;comment:用户名"`
-	PasswordHash string `gorm:"size:256;not null;comment:密码哈希，不存明文"`
+	// json:"-"：登录/注册/注册租户等接口返回 user 对象时不泄露密码哈希（README 安全红线）
+	PasswordHash string `gorm:"size:256;not null;comment:密码哈希，不存明文" json:"-"`
 	Role         string `gorm:"size:32;not null;comment:admin / member"`
 	Status       int8   `gorm:"default:1"`
 	CreatedAt    time.Time
@@ -37,7 +38,7 @@ type Document struct {
 	UserID         uint64 `gorm:"index;comment:上传者用户ID"`
 	Name           string `gorm:"size:256;not null;comment:文档名称"`
 	MinioObjectKey string `gorm:"size:512;not null;comment:minio存储key"`
-	Status         string `gorm:"size:32;not null;comment:pending/processing/success/fail"`
+	Status         string `gorm:"size:32;not null;comment:pending/processing/success/failed"`
 	ErrorMsg       string `gorm:"type:text;comment:失败原因（仅 failed 状态时记录）"`
 	Summary        string `gorm:"type:text;comment:文档摘要（可选：向量化成功后由 LLM 预生成，用于 list_documents 帮 LLM 选文档）"`
 	Size           int64  `gorm:"comment:文件字节大小"`

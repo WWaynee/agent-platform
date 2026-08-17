@@ -21,8 +21,10 @@ type RegisterReq struct {
 }
 
 // LoginReq 用户登录请求
+// tenant_id 可选（需求单 0004）：传了则按「租户+用户名」登录（老方式）；不传按「用户名」全局登录
+// （用户名全库唯一直接登录；多个租户同名则返回明确错误）。
 type LoginReq struct {
-	TenantID uint64 `json:"tenant_id" binding:"required"`              // 租户 ID
+	TenantID uint64 `json:"tenant_id" binding:"omitempty"`              // 租户 ID（可选；不传则按用户名全局登录）
 	Username string `json:"username" binding:"required,min=2,max=64"`  // 用户名
 	Password string `json:"password" binding:"required,min=6,max=128"` // 密码
 }

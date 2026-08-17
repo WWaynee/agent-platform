@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +139,113 @@ func TestLogin_DisabledTenantRejected(t *testing.T) {
 	} else {
 		t.Logf("✅ 禁用租户内的账号登录被拒: %v", err)
 	}
+}
+
+// ===== 需求单 0004：纯用户名登录 + 响应脱敏 =====
+
+// TestLogin_ByUsername_Unique 验证纯用户名（tenant_id=0）登录（需求单 0004）：
+// 用户名全库唯一 → 直接登录成功，返回用户携带正确 tenant_id（与按租户登录一致）。
+func TestLogin_ByUsername_Unique(t *testing.T) {
+	setupTestDB(t)
+	_ = config.Load()
+
+	name := randTenantName("byuser")
+	tenant, _, err := RegisterTenant(context.Background(), name, "unique_bob", "Bob@123456")
+	if err != nil {
+		t.Fatalf("RegisterTenant 失败: %v", err)
+	}
+	defer cleanupTenant(t, tenant.ID)
+
+	// 纯用户名登录（tenantID=0）
+	user, err := Login(context.Background(), 0, "unique_bob", "Bob@123456")
+	if err != nil {
+		t.Fatalf("纯用户名登录应成功，实际: %v", err)
+	}
+	if user.ID == 0 || user.TenantID != tenant.ID {
+		t.Errorf("纯用户名登录应命中该租户用户：期望 tenant_id=%d，实际 %d（user.ID=%d）", tenant.ID, user.TenantID, user.ID)
+	}
+	t.Logf("✅ 纯用户名登录成功，命中 tenant_id=%d user_id=%d", user.TenantID, user.ID)
+}
+
+// TestLogin_ByUsername_NotFound 验证纯用户名登录「用户名不存在」：
+// 统一返回「用户名或密码错误」（不区分存在性，防探测）。
+func TestLogin_ByUsername_NotFound(t *testing.T) {
+	setupTestDB(t)
+	_ = config.Load()
+
+	_, err := Login(context.Background(), 0, "no_such_user_zz", "Whatever@123456")
+	if err == nil || !containsStr(err.Error(), "用户名或密码错误") {
+		t.Errorf("不存在的用户名登录应返回「用户名或密码错误」，实际 err=%v", err)
+	} else {
+		t.Logf("✅ 纯用户名登录·不存在 → 用户名或密码错误: %v", err)
+	}
+}
+
+// TestLogin_ByUsername_Duplicate 验证纯用户名登录「多租户同名冲突」：
+// 两个租户各有同名用户时，纯用户名登录无法消除歧义 → 返回明确错误引导。
+func TestLogin_ByUsername_Duplicate(t *testing.T) {
+	setupTestDB(t)
+	_ = config.Load()
+
+	// 两个租户都建同名 "sharedname"
+	tn1 := randTenantName("dup-1")
+	t1, _, err := RegisterTenant(context.Background(), tn1, "sharedname", "Shared@123456")
+	if err != nil {
+		t.Fatalf("租户1注册失败: %v", err)
+	}
+	defer cleanupTenant(t, t1.ID)
+	tn2 := randTenantName("dup-2")
+	t2, _, err := RegisterTenant(context.Background(), tn2, "sharedname", "Shared@123456")
+	if err != nil {
+		t.Fatalf("租户2注册失败: %v", err)
+	}
+	defer cleanupTenant(t, t2.ID)
+
+	// 纯用户名登录 → 应报同名冲突
+	_, err = Login(context.Background(), 0, "sharedname", "Shared@123456")
+	if err == nil || !strings.Contains(err.Error(), "多个租户") {
+		t.Errorf("多租户同名时纯用户名登录应返回「多个租户」明确错误，实际 err=%v", err)
+	} else {
+		t.Logf("✅ 多租户同名冲突被正确识别: %v", err)
+	}
+
+	// 带 tenant_id 的老方式仍能精确登录（不受影响）
+	if _, err := Login(context.Background(), t1.ID, "sharedname", "Shared@123456"); err != nil {
+		t.Errorf("带租户精确登录应成功，实际: %v", err)
+	}
+}
+
+// TestUser_PasswordHashOmitted 验证 user 对象序列化时不再泄露密码哈希（需求单 0004 脱敏）：
+// User.PasswordHash 加了 json:"-"，JSON 输出应不含 PasswordHash 字段。
+func TestUser_PasswordHashOmitted(t *testing.T) {
+	setupTestDB(t)
+	_ = config.Load()
+
+	name := randTenantName("nohash")
+	tenant, _, err := RegisterTenant(context.Background(), name, "nohash_admin", "NoHash@123456")
+	if err != nil {
+		t.Fatalf("RegisterTenant 失败: %v", err)
+	}
+	defer cleanupTenant(t, tenant.ID)
+
+	user, err := Login(context.Background(), 0, "nohash_admin", "NoHash@123456")
+	if err != nil {
+		t.Fatalf("登录失败: %v", err)
+	}
+
+	raw, err := json.Marshal(user)
+	if err != nil {
+		t.Fatalf("序列化 user 失败: %v", err)
+	}
+	if strings.Contains(string(raw), "PasswordHash") || strings.Contains(string(raw), "$2a$") {
+		t.Errorf("JSON 输出不应包含密码哈希字段（脱敏失效）: %s", string(raw))
+	}
+	t.Logf("✅ user JSON 脱敏：不含 PasswordHash，输出=%s", string(raw))
+}
+
+// containsStr 判断字符串是否包含子串（避免错误消息断言与项目错误码耦合）。
+func containsStr(s, sub string) bool {
+	return strings.Contains(s, sub)
 }
 
 // TestRegisterTenant_DuplicateNameRejected 验证重复注册同名租户被拒（需求单 0001 第 5.1 点）：

@@ -590,6 +590,27 @@ go run cmd/worker/main.go     # Worker 独立进程（消费 document_parse 队�
 - 健康检查（详细依赖状态）：`http://127.0.0.1:{HTTP_PORT}/health`（全部正常 200，任一依赖挂 503）
 - Prometheus 指标（独立内网端口）：`http://127.0.0.1:{METRICS_PORT}/metrics`（默认 9090，0=禁用）
 
+## 🖥️ 前端界面（web/，需求单 0004）
+
+系统内置一个**零构建纯静态前端**（`web/` 目录）：登录/注册页、三栏主工作台、管理后台。技术栈为原生 HTML + JS + Tailwind CDN，无需安装依赖、无需构建，直接丢给 Nginx/任意静态服务器即可。
+
+**后端登录体验改造（需求单 0004 起）**：`POST /api/user/login` 的 `tenant_id` 改为**可选**——不传则按「用户名」全局登录（用户名全库唯一直接登录；多租户同名返回明确错误引导），前端登录页只需「用户名 + 密码」。传 `tenant_id` 的老调用方式完全兼容。登录/注册接口返回的 `user` 对象已对 `PasswordHash` 脱敏（不再泄露密码哈希）。
+
+前端快速本地预览（开发期，浏览器直接打开 HTML 即可，注意后端 CORS 默认允许任意来源）：
+```bash
+# 方式一：Nginx 反代（推荐，见 deploy/nginx.conf）
+# 把 web/ 挂到 Nginx root，/api 反代到 http://127.0.0.1:8080
+
+# 方式二：仅开发预览 HTML（路由/user等接口需后端 CORS 允许）
+open web/login.html   # 或 python3 -m http.server 后访问
+```
+页面：
+- `login.html`：登录 + 租户注册（注册成功自动登录进入工作台）
+- `index.html`：三栏工作台（左会话列表 / 中对话区 / 右文档管理）
+- `admin.html`：管理后台（工具开关 + 用量统计，仅 admin 角色可见入口）
+
+> ⚠️ 前端要点：业务错误为 HTTP 200 + `body.code!=0`（仅鉴权失败是真正 401）；删除文档仅上传者本人可删；对话无流式（普通 JSON 全量返回）；限流（用户 60/分、对话 20/分），文档任务轮询间隔 ≥2s 防撞 429。
+
 ## ⚠️ 注意事项（精要）
 
 - **启动顺序**：先 `docker compose up -d` 拉起全部中间件，再跑 `migrate` 建表，最后启 `api`（如需要异步解析再加 `worker`）。
@@ -633,6 +654,17 @@ agent-platform/
 │   ├── configtest/            #   配置自检工具（未配置输出调试日志，仅本地用）
 │   ├── llm-demo/              #   llmclient 演示：go run ./cmd/llm-demo chat|embed
 │   └── llm-selfcheck/         #   llmclient 自测：Chat/Embedding/token 全通过返回 ✅
+│
+├── deploy/                    # 部署参考配置（需求单 0004）
+│   └── nginx.conf             #   Nginx 反代参考：web/ 静态托管 + /api 反代到后端(Gin 8080) + 上传10MB/对话超时
+│
+├── web/                       # 前端静态资源（需求单 0004，零构建纯静态）
+│   ├── login.html             #   登录 + 租户注册（登录取名全局登录，注册成功自动登录）
+│   ├── index.html             #   三栏主工作台（左会话/中对话/右文档）
+│   ├── admin.html             #   管理后台（工具开关 + 用量统计，仅 admin）
+│   ├── css/style.css          #   少量自定义样式
+│   └── js/                    #   api.js(请求封装/401/业务码) · auth.js(鉴权/登录态)
+│                              #   chat.js(会话+对话) · document.js(文档管理) · admin.js(后台逻辑)
 │
 ├── config/
 │   └── config.go              # 全局配置：读取 .env，注入 MySQL/Redis/MinIO/Qdrant/JWT/LLM/Server

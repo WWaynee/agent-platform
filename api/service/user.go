@@ -99,7 +99,13 @@ func ensureTenantActive(ctx context.Context, tenantID uint64) error {
 
 // Login 用户登录
 // ctx 携带请求级 trace_id/tenant_id，透传给 storage 使 DB 日志带同一链路 ID。
-// 登录请求需携带 tenant_id + username + password
+//
+// 登录方式（需求单 0004 起支持两种）：
+//   - tenantID > 0：按「租户 + 用户名」登录（兼容老调用方 / e2e 脚本）；
+//   - tenantID == 0：按「用户名」全局登录（前端只输用户名+密码）——
+//     用户名全库唯一则直接登录；存在多个租户同名则返回明确错误（无法消除歧义）；
+//     不存在则统一「用户名或密码错误」。
+//
 // 无论用户不存在还是密码错误，统一返回"用户名或密码错误"（安全考虑，不让攻击者探测用户名是否有效）
 //
 // ⚠️ 多租户安全（对应需求单 0001）：登录是公开接口、只能靠前端自报 tenant_id，
@@ -107,13 +113,23 @@ func ensureTenantActive(ctx context.Context, tenantID uint64) error {
 //   - 租户不存在（孤儿账号）→ 拒绝登录；
 //   - 租户被禁用 → 拒绝登录（禁用租户内的账号不能继续登录）。
 func Login(ctx context.Context, tenantID uint64, username, password string) (*model.User, error) {
-	// 1. 按租户 + 用户名查用户
-	user, err := storage.GetUserByUsername(ctx, tenantID, username)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("用户名或密码错误")
+	// 1. 定位用户：优先按「租户+用户名」精确查（老方式）；tenantID==0 时按用户名全局解析唯一身份
+	var user *model.User
+	if tenantID > 0 {
+		u, err := storage.GetUserByUsername(ctx, tenantID, username)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("用户名或密码错误")
+			}
+			return nil, fmt.Errorf("查询用户失败: %w", err)
 		}
-		return nil, fmt.Errorf("查询用户失败: %w", err)
+		user = u
+	} else {
+		u, err := loginResolveByUsername(ctx, username)
+		if err != nil {
+			return nil, err
+		}
+		user = u
 	}
 
 	// 2. 校验租户存在且启用（堵孤儿账号 / 禁用租户登录）
@@ -130,4 +146,23 @@ func Login(ctx context.Context, tenantID uint64, username, password string) (*mo
 	// 审计：登录是公开接口，登录前 ctx 还没有 user_id（未鉴权），故用查到的 user 补齐租户/用户再记录。
 	RecordAuditLog(interfaces.WithTenantUser(ctx, user.TenantID, user.ID), "登录", fmt.Sprintf("用户 %q 登录成功", user.Username))
 	return user, nil
+}
+
+// loginResolveByUsername 按用户名全库解析唯一登录身份（需求单 0004）。
+//   - 命中 0 个 → 统一「用户名或密码错误」（不区分存在性，防探测）；
+//   - 命中 1 个 → 返回该用户；
+//   - 命中多个（不同租户共存同名）→ 返回明确错误，引导用户提供租户标识。
+func loginResolveByUsername(ctx context.Context, username string) (*model.User, error) {
+	users, err := storage.FindUsersByUsername(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+	switch len(users) {
+	case 0:
+		return nil, fmt.Errorf("用户名或密码错误")
+	case 1:
+		return &users[0], nil
+	default:
+		return nil, fmt.Errorf("该用户名在多个租户下存在，无法自动登录，请提供租户 ID")
+	}
 }

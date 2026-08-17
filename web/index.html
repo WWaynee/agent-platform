@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <link rel="stylesheet" href="css/style.css" />
+  <title>工作台 · 多租户智能 Agent</title>
+</head>
+<body class="bg-gray-100 h-screen overflow-hidden flex flex-col">
+  <!-- toast 容器 -->
+  <div id="toastContainer" class="fixed top-4 right-4 z-50 space-y-2"></div>
+
+  <!-- 顶部栏 -->
+  <header class="bg-white border-b border-gray-200 h-14 flex items-center px-4 shadow-sm shrink-0">
+    <div class="flex items-center gap-2 w-64">
+      <div class="w-9 h-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center">
+        <i class="fa-solid fa-robot"></i>
+      </div>
+      <div class="leading-tight">
+        <div class="font-bold text-gray-800 text-sm" id="topTenantName">工作台</div>
+        <div class="text-gray-400 text-xs">智能 Agent 助手</div>
+      </div>
+    </div>
+
+    <div class="flex-1"></div>
+
+    <button id="adminEntry" class="hidden mr-3 text-sm text-indigo-600 hover:text-indigo-800 font-medium">
+      <i class="fa-solid fa-sliders mr-1"></i>管理后台
+    </button>
+
+    <div class="flex items-center gap-3 text-sm">
+      <div class="text-right">
+        <div class="text-gray-800 font-medium" id="topUsername"></div>
+        <div class="text-gray-400 text-xs" id="topRole"></div>
+      </div>
+      <button onclick="logout()" class="text-gray-400 hover:text-red-500">
+        <i class="fa-solid fa-right-from-bracket"></i><span class="ml-1 hidden sm:inline">退出</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 三栏主体 -->
+  <div class="flex flex-1 overflow-hidden">
+    <!-- 左栏：会话列表 -->
+    <aside class="w-64 bg-white border-r border-gray-200 flex flex-col shrink-0">
+      <div class="p-3">
+        <button onclick="createSession()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1">
+          <i class="fa-solid fa-plus"></i>新建会话
+        </button>
+      </div>
+      <div class="px-3 pb-1 text-xs text-gray-400 font-medium">会话列表</div>
+      <div id="sessionList" class="flex-1 overflow-y-auto px-2 pb-2"></div>
+    </aside>
+
+    <!-- 中栏：对话区 -->
+    <main class="flex-1 flex flex-col">
+      <div id="messageBox" class="flex-1 overflow-y-auto p-6"></div>
+      <div class="border-t bg-white">
+        <div class="flex items-end gap-2 p-3 max-w-4xl mx-auto w-full">
+          <div class="flex-1">
+            <textarea id="chatInput" rows="2" class="w-full border rounded-xl p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              placeholder="输入你的问题，例如：我在员工手册里的带薪年假是多少天？ （Enter 发送，Shift+Enter 换行）"
+              onkeydown="onChatKeydown(event)"></textarea>
+          </div>
+          <button id="sendBtn" onclick="sendMessage()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl font-medium h-12 flex items-center justify-center">
+            <i class="fa-solid fa-paper-plane"></i>
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <!-- 右栏：文档管理 -->
+    <aside class="w-80 bg-white border-l border-gray-200 flex flex-col shrink-0">
+      <div class="p-3 border-b">
+        <div class="flex items-center justify-between mb-3">
+          <span class="font-medium text-gray-700 text-sm"><i class="fa-solid fa-folder-open mr-1"></i>文档管理</span>
+          <span class="text-xs text-gray-400">支持 .txt / .md</span>
+        </div>
+        <!-- 上传区 -->
+        <label id="uploadZone" class="block border-2 border-dashed border-gray-300 rounded-lg p-4 text-center cursor-pointer hover:border-indigo-500 hover:bg-indigo-50 transition">
+          <input id="fileInput" type="file" accept=".txt,.md" class="hidden" onchange="handleFileInput(event)" />
+          <i class="fa-solid fa-cloud-arrow-up text-2xl text-gray-400 mb-1"></i>
+          <div class="text-sm text-gray-500">点击选择或拖拽文件上传</div>
+          <div class="text-xs text-gray-400 mt-1">最大 10MB</div>
+        </label>
+        <div class="flex gap-2 mt-3">
+          <button id="uploadBtn" onclick="document.getElementById('fileInput').click()" class="flex-1 bg-purple-600 hover:bg-purple-700 text-white py-2 rounded-lg text-sm font-medium">
+            <i class="fa-solid fa-upload mr-1"></i>上传文档
+          </button>
+          <button onclick="loadDocuments()" class="px-3 text-sm text-gray-500 hover:text-gray-700 border rounded-lg" title="刷新">
+            <i class="fa-solid fa-rotate"></i>
+          </button>
+        </div>
+      </div>
+      <div id="docList" class="flex-1 overflow-y-auto"></div>
+    </aside>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/document.js"></script>
+  <script>
+    // ===== 页面初始化 =====
+    if (!requireAuth()) { /* 已跳转 */ }
+    else {
+      initTopBar();
+      setupDragDrop();
+      loadSessions();
+      loadDocuments();
+      document.getElementById('chatInput').focus();
+    }
+
+    function initTopBar() {
+      const user = getUser();
+      if (!user) { logout(); return; }
+      document.getElementById('topUsername').textContent = user.Username || '用户';
+      const roleText = user.Role === 'admin' ? '管理员' : (user.Role === 'member' ? '成员' : (user.Role || ''));
+      document.getElementById('topRole').textContent = roleText;
+      const tenantName = getTenantName();
+      document.getElementById('topTenantName').textContent = tenantName || ('租户 ' + (user.TenantID || ''));
+
+      // 管理后台入口（仅 admin 可见）
+      if (user.Role === 'admin') {
+        const entry = document.getElementById('adminEntry');
+        entry.classList.remove('hidden');
+        entry.onclick = function () { window.location.href = '/admin.html'; };
+      }
+    }
+
+    function handleFileInput(e) {
+      const file = e.target.files[0];
+      if (file) doUpload(file);
+    }
+
+    function onChatKeydown(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    }
+
+    // ===== toast 提示 =====
+    function toast(text, type) {
+      const container = document.getElementById('toastContainer');
+      const div = document.createElement('div');
+      const color = type === 'success' ? 'bg-green-500' : (type === 'error' ? 'bg-red-500' : 'bg-gray-800');
+      const icon = type === 'success' ? 'fa-circle-check' : (type === 'error' ? 'fa-circle-exclamation' : 'fa-info-circle');
+      div.className = 'text-white text-sm px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 ' + color;
+      div.innerHTML = '<i class="fa-solid ' + icon + '"></i><span>' + escapeHtml(String(text)) + '</span>';
+      container.appendChild(div);
+      setTimeout(function () { div.remove(); }, 3500);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <link rel="stylesheet" href="css/style.css" />
+  <title>登录 · 多租户智能工作台</title>
+</head>
+<body class="bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 min-h-screen flex items-center justify-center px-4">
+  <div class="w-full max-w-md">
+    <div class="bg-white rounded-2xl shadow-2xl p-8">
+      <!-- Logo -->
+      <div class="text-center mb-8">
+        <div class="w-14 h-14 mx-auto rounded-xl bg-indigo-600 text-white flex items-center justify-center text-2xl">
+          <i class="fa-solid fa-robot"></i>
+        </div>
+        <h1 class="mt-4 text-2xl font-bold text-gray-800">多租户智能 Agent 工作台</h1>
+        <p class="mt-1 text-sm text-gray-400">企业私有知识库 · 智能问答</p>
+      </div>
+
+      <!-- Tab 切换 -->
+      <div class="flex mb-6 bg-gray-100 rounded-lg p-1 text-sm">
+        <button id="tabLogin" class="flex-1 py-2 rounded-md font-medium tab-btn" onclick="switchTab('login')">
+          <i class="fa-solid fa-right-to-bracket mr-1"></i>登录
+        </button>
+        <button id="tabRegister" class="flex-1 py-2 rounded-md text-gray-600 tab-btn" onclick="switchTab('register')">
+          <i class="fa-solid fa-building mr-1"></i>注册租户
+        </button>
+      </div>
+
+      <!-- 登录表单 -->
+      <form id="loginForm" class="space-y-4" onsubmit="handleLogin(event)">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">用户名</label>
+          <input id="loginUsername" type="text" required minlength="2" class="input-field" placeholder="请输入用户名" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">密码</label>
+          <input id="loginPassword" type="password" required minlength="6" class="input-field" placeholder="请输入密码" />
+        </div>
+        <button type="submit" id="loginBtn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg font-medium transition">
+          <i class="fa-solid fa-right-to-bracket mr-1"></i>登录
+        </button>
+        <p id="loginTip" class="hidden text-xs text-gray-400 text-center mt-2"></p>
+      </form>
+
+      <!-- 注册租户表单 -->
+      <form id="registerForm" class="space-y-4 hidden" onsubmit="handleRegister(event)">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">租户名称（公司名称）</label>
+          <input id="regTenantName" type="text" required minlength="1" maxlength="64" class="input-field" placeholder="例如：某某科技有限公司" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">管理员用户名</label>
+          <input id="regUsername" type="text" required minlength="2" maxlength="64" class="input-field" placeholder="管理员登录名" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">管理员密码</label>
+          <input id="regPassword" type="password" required minlength="6" maxlength="128" class="input-field" placeholder="至少 6 位" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">确认密码</label>
+          <input id="regPassword2" type="password" required minlength="6" maxlength="128" class="input-field" placeholder="再次输入密码" />
+        </div>
+        <button type="submit" id="registerBtn" class="w-full bg-purple-600 hover:bg-purple-700 text-white py-2.5 rounded-lg font-medium transition">
+          <i class="fa-solid fa-building mr-1"></i>注册租户
+        </button>
+        <p id="registerTip" class="hidden text-xs text-gray-400 text-center mt-2"></p>
+      </form>
+
+      <!-- 提示消息 -->
+      <div id="message" class="hidden mt-4 px-4 py-3 rounded-lg text-sm"></div>
+    </div>
+
+    <p class="text-center text-white/70 text-xs mt-6">登录即表示同意遵守平台服务条款 · 仅供内部演示</p>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/auth.js"></script>
+  <script>
+    // 已登录则直接进工作台
+    if (isLoggedIn()) { window.location.href = '/index.html'; }
+
+    // 占位工具函数：统一加载脚本（避免内联脚本顺序问题，这里直接内联逻辑）
+    function switchTab(tab) {
+      const isLogin = tab === 'login';
+      document.getElementById('tabLogin').className = 'flex-1 py-2 rounded-md font-medium tab-btn' + (isLogin ? ' bg-white shadow text-indigo-600' : ' text-gray-600');
+      document.getElementById('tabRegister').className = 'flex-1 py-2 rounded-md font-medium tab-btn' + (!isLogin ? ' bg-white shadow text-purple-600' : ' text-gray-600');
+      document.getElementById('loginForm').classList.toggle('hidden', !isLogin);
+      document.getElementById('registerForm').classList.toggle('hidden', isLogin);
+      hideMessage();
+    }
+
+    function showMessage(type, text) {
+      const el = document.getElementById('message');
+      el.classList.remove('hidden');
+      el.className = 'mt-4 px-4 py-3 rounded-lg text-sm ' + (type === 'error' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600');
+      el.innerHTML = text;
+    }
+
+    function hideMessage() {
+      document.getElementById('message').classList.add('hidden');
+    }
+
+    function setBtnLoading(btn, loading, text) {
+      btn.disabled = loading;
+      btn.innerHTML = loading ? '<i class="fa-solid fa-spinner fa-spin mr-1"></i>处理中...' : text;
+    }
+
+    // ============ 登录 ============
+    async function handleLogin(e) {
+      e.preventDefault();
+      const username = document.getElementById('loginUsername').value.trim();
+      const password = document.getElementById('loginPassword').value;
+      const btn = document.getElementById('loginBtn');
+      hideMessage();
+      setBtnLoading(btn, true, '<i class="fa-solid fa-right-to-bracket mr-1"></i>登录');
+      try {
+        // 不传 tenant_id：后端按用户名全局登录
+        const data = await api.post('/user/login', { username, password });
+        await afterLogin(data);
+        window.location.href = '/index.html';
+      } catch (err) {
+        showMessage('error', '<i class="fa-solid fa-circle-exclamation mr-1"></i>' + escapeHtml(err.message));
+      } finally {
+        setBtnLoading(btn, false, '<i class="fa-solid fa-right-to-bracket mr-1"></i>登录');
+      }
+    }
+
+    // ============ 注册租户 ============
+    async function handleRegister(e) {
+      e.preventDefault();
+      const name = document.getElementById('regTenantName').value.trim();
+      const username = document.getElementById('regUsername').value.trim();
+      const password = document.getElementById('regPassword').value;
+      const password2 = document.getElementById('regPassword2').value;
+      const btn = document.getElementById('registerBtn');
+      hideMessage();
+
+      if (password !== password2) {
+        showMessage('error', '<i class="fa-solid fa-circle-exclamation mr-1"></i>两次输入的密码不一致');
+        return;
+      }
+
+      setBtnLoading(btn, true, '<i class="fa-solid fa-building mr-1"></i>注册租户');
+      try {
+        await api.post('/tenant/register', {
+          name,
+          admin_username: username,
+          admin_password: password,
+        });
+        // 注册成功后自动用刚创建的 admin 登录，直接进入工作台
+        showMessage('', '');
+        setBtnLoading(btn, true, '<i class="fa-solid fa-right-to-bracket mr-1"></i>注册成功，正在自动登录...');
+        const data = await api.post('/user/login', { username, password });
+        await afterLogin(data);
+        window.location.href = '/index.html';
+      } catch (err) {
+        showMessage('error', '<i class="fa-solid fa-circle-exclamation mr-1"></i>' + escapeHtml(err.message));
+      } finally {
+        setBtnLoading(btn, false, '<i class="fa-solid fa-building mr-1"></i>注册租户');
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function (m) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m];
+      });
+    }
+  </script>
+</body>
+</html>
