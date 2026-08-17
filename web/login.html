@@ -158,7 +158,13 @@
         await afterLogin(data);
         window.location.href = '/index.html';
       } catch (err) {
-        showMessage('error', '<i class="fa-solid fa-circle-exclamation mr-1"></i>' + escapeHtml(err.message));
+        // 用户名全局唯一：后端校验到重复时明确提示不允许通过
+        const msg = String(err.message || '');
+        if (msg.indexOf('用户名已存在') !== -1) {
+          showMessage('error', '<i class="fa-solid fa-user-xmark mr-1"></i>该用户名已被注册，必须唯一，不允许重复使用。请更换用户名再试。');
+        } else {
+          showMessage('error', '<i class="fa-solid fa-circle-exclamation mr-1"></i>' + escapeHtml(msg));
+        }
       } finally {
         setBtnLoading(btn, false, '<i class="fa-solid fa-building mr-1"></i>注册租户');
       }

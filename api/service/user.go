@@ -44,15 +44,16 @@ func Register(ctx context.Context, tenantID uint64, username, password, role str
 //   - Register：用默认连接 storage.DB 执行（普通自助注册）；
 //   - RegisterTenant：在建租户事务内用事务句柄 tx 执行（首个 admin，与其它子步骤原子提交）。
 func registerInTx(ctx context.Context, db *gorm.DB, tenantID uint64, username, password, role string) (*model.User, error) {
-	// 1. 校验该租户外下用户名是否已存在
+	// 1. 校验「用户名」是否已全局存在（需求：用户名必须全局唯一，不允许跨租户同名）。
+	//    从"本租户同名"收紧为"全库同名"——任一租户已注册该用户名则拒绝，前端据此提示"不允许通过"。
 	var count int64
 	if err := db.WithContext(ctx).Model(&model.User{}).
-		Where("tenant_id = ? AND username = ?", tenantID, username).
+		Where("username = ?", username).
 		Count(&count).Error; err != nil {
 		return nil, fmt.Errorf("查询用户失败: %w", err)
 	}
 	if count > 0 {
-		return nil, fmt.Errorf("用户名已存在")
+		return nil, fmt.Errorf("用户名已存在，请更换")
 	}
 
 	// 2. 密码哈希

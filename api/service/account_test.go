@@ -11,6 +11,7 @@ import (
 	"agent-platform/config"
 	"agent-platform/storage"
 	"agent-platform/storage/model"
+	"agent-platform/util"
 )
 
 // TestRegisterTenant_Basic 验证公开注册租户（需求单 0001）：
@@ -187,19 +188,37 @@ func TestLogin_ByUsername_Duplicate(t *testing.T) {
 	setupTestDB(t)
 	_ = config.Load()
 
-	// 两个租户都建同名 "sharedname"
+	// 需求变更后注册已禁止跨租户同名，故用「直接插入」构造跨租户同名场景来测登录同名冲突：
+	// 租户1 正常注册 admin=sharedname；租户2 注册别的 admin，再直接向租户2插入同名 user=sharedname
 	tn1 := randTenantName("dup-1")
 	t1, _, err := RegisterTenant(context.Background(), tn1, "sharedname", "Shared@123456")
 	if err != nil {
 		t.Fatalf("租户1注册失败: %v", err)
 	}
 	defer cleanupTenant(t, t1.ID)
+
 	tn2 := randTenantName("dup-2")
-	t2, _, err := RegisterTenant(context.Background(), tn2, "sharedname", "Shared@123456")
+	t2, _, err := RegisterTenant(context.Background(), tn2, "dup2admin", "Shared@123456")
 	if err != nil {
 		t.Fatalf("租户2注册失败: %v", err)
 	}
 	defer cleanupTenant(t, t2.ID)
+
+	// 直接向租户2插入同名用户 sharedname（绕过注册校验，构造跨租户同名数据，模拟历史遗留）
+	hash, err := util.HashPassword("Shared@123456")
+	if err != nil {
+		t.Fatalf("HashPassword 失败: %v", err)
+	}
+	dupUser := &model.User{
+		TenantID:     t2.ID,
+		Username:     "sharedname",
+		PasswordHash: hash,
+		Role:         "member",
+		Status:       1,
+	}
+	if err := storage.CreateUser(context.Background(), dupUser); err != nil {
+		t.Fatalf("构造跨租户同名用户失败: %v", err)
+	}
 
 	// 纯用户名登录 → 应报同名冲突
 	_, err = Login(context.Background(), 0, "sharedname", "Shared@123456")
