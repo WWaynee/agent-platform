@@ -332,6 +332,53 @@ func TestRegister_ToExistingTenant(t *testing.T) {
 	t.Log("✅ 向存在租户注册 member/admin 均成功，且校验租户存在")
 }
 
+// TestRegister_UsernameGloballyUnique 验证「注册用户名全局唯一」（用户补充要求）：
+// 用户名必须在全库唯一，不允许跨租户同名。
+//  1. 租户 A 注册 admin=uname → 成功；
+//  2. 租户 A 内再注册同名 uname → 「用户名已存在」被拒；
+//  3. 租户 B（别的 admin 名）再注册同名 uname（跨租户）→ 同样被拒（全局唯一生效）；
+//  4. 租户 B 注册不同名用户 → 成功（不受影响）。
+func TestRegister_UsernameGloballyUnique(t *testing.T) {
+	setupTestDB(t)
+	_ = config.Load()
+
+	uname := "glob_unique_" + randSuffix()
+
+	// 1. 租户 A 注册 admin=uname → 成功
+	name := randTenantName("gu-a")
+	ta, _, err := RegisterTenant(context.Background(), name, uname, "Guniq@123456")
+	if err != nil {
+		t.Fatalf("租户A注册失败: %v", err)
+	}
+	defer cleanupTenant(t, ta.ID)
+
+	// 2. 租户 A 内再注册同名 → 被拒
+	if _, err := Register(context.Background(), ta.ID, uname, "Guniq@123456", "member"); err == nil {
+		t.Errorf("同租户内注册同名应被拒，实际成功")
+	} else {
+		t.Logf("✅ 同租户内同名注册被拒: %v", err)
+	}
+
+	// 3. 租户 B 用不同 admin 注册，再跨租户注册同名 → 被拒（全局唯一）
+	nameB := randTenantName("gu-b")
+	tb, _, err := RegisterTenant(context.Background(), nameB, "gu_b_admin", "Guniq@123456")
+	if err != nil {
+		t.Fatalf("租户B注册失败: %v", err)
+	}
+	defer cleanupTenant(t, tb.ID)
+	if _, err := Register(context.Background(), tb.ID, uname, "Guniq@123456", "member"); err == nil {
+		t.Errorf("跨租户注册同名应被拒（用户名全局唯一），实际成功")
+	} else {
+		t.Logf("✅ 跨租户同名注册被拒（全局唯一生效）: %v", err)
+	}
+
+	// 4. 租户 B 注册不同名用户 → 成功
+	if _, err := Register(context.Background(), tb.ID, "gu_b_member", "Guniq@123456", "member"); err != nil {
+		t.Errorf("租户B注册不同名用户应成功，实际: %v", err)
+	}
+	t.Log("✅ 用户名全局唯一：跨租户同名注册被拒，不同名注册正常")
+}
+
 // ===== 测试辅助 =====
 
 var accountTestSeq int
