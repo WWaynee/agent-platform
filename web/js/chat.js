@@ -91,6 +91,11 @@ async function loadMessages() {
 
 function renderMessages(msgs) {
   const box = document.getElementById('messageBox');
+  // 防御（P0 修复）：如果冷轨历史瞬时为空（异步写入滞后）且界面已有内容，
+  // 不清空现有对话，避免"发送后整个界面被清空"。
+  if ((!msgs || msgs.length === 0) && box.children.length > 0) {
+    return;
+  }
   box.innerHTML = '';
   if (!msgs || msgs.length === 0) {
     box.innerHTML = '<div class="text-gray-400 text-sm text-center py-16">开始对话吧，向你的企业知识库提问</div>';
@@ -202,10 +207,24 @@ async function sendMessage() {
       currentSessionId = newSessionId;
       loadSessions(); // 刷新左侧，出现新会话
     }
-    // 刷新完整历史（含工具调用过程 + 回答）
-    await loadMessages();
+    // 移除"思考中"占位
+    if (box.lastChild && box.lastChild === thinking) {
+      box.removeChild(box.lastChild);
+    }
+    // 用 chat 响应实时渲染回答（不走冷轨历史——冷轨是异步后台写入，发送后立即读可能为空导致界面被清空）
+    // 工具调用过程：chat 响应带 tool_calls（工具名列表），实时且可靠，展示为引导条；
+    // 完整工具调用/结果细节在冷轨历史，切换/刷新会话时经 loadMessages 展示。
+    const toolNames = Array.isArray(resp.tool_calls) ? resp.tool_calls : [];
+    if (toolNames.length > 0) {
+      box.appendChild(buildToolCall('call', '调用了工具：' + toolNames.join('、')));
+    }
+    box.appendChild(buildBubble('assistant', resp.answer || ''));
+    scrollToBottom();
   } catch (err) {
-    box.removeChild(box.lastChild); // 移除 thinking
+    // 尽力移除 thinking（若仍在）
+    if (box.lastChild && box.lastChild === thinking) {
+      box.removeChild(box.lastChild);
+    }
     box.appendChild(buildBubble('assistant', '出错了：' + err.message));
     scrollToBottom();
   } finally {
