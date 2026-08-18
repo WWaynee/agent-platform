@@ -344,13 +344,14 @@ function buildToolCall(type, content) {
   const isResult = type === 'result';
 
   div.innerHTML =
-    '<div class="max-w-[85%] bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs flex items-start gap-2 ' + color + '">' +
-      '<i class="fa-solid ' + icon + ' mt-0.5"></i>' +
-      '<div class="flex-1 min-w-0"><div class="text-gray-500 mb-0.5">' +
-        (isCall ? '🔧 正在调用工具…' : (type === 'system' ? '系统消息：' : '📄 工具返回：')) +
-      '</div>' +
-      '<div class="tool-result-body whitespace-pre-wrap break-words"></div>' +
-      (isResult ? '<button class="tool-result-toggle mt-1 text-sky-600 hover:text-sky-800 font-medium"></button>' : '') +
+    '<div class="w-full max-w-[600px] bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs flex items-start gap-2 ' + color + '">' +
+      '<i class="fa-solid ' + icon + ' mt-0.5 shrink-0"></i>' +
+      '<div class="flex-1 min-w-0 flex flex-col">' +
+        '<div class="text-gray-500 mb-0.5">' +
+          (isCall ? '🔧 正在调用工具…' : (type === 'system' ? '系统消息：' : '📄 工具返回：')) +
+        '</div>' +
+        '<div class="tool-result-body whitespace-pre-wrap break-words"></div>' +
+        (isResult ? '<button class="tool-result-toggle self-end mt-1 text-sky-600 hover:text-sky-800 font-medium"></button>' : '') +
       '</div>' +
     '</div>';
 
