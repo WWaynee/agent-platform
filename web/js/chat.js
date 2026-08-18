@@ -43,6 +43,11 @@ async function loadSessions() {
       item.addEventListener('click', function () { selectSession(s.ID); });
       el.appendChild(item);
     });
+
+    // 若当前未选中任何会话（页面初始 / 无选中），默认进入列表中最新的会话（列表按更新时间倒序）
+    if (currentSessionId === null || currentSessionId === undefined) {
+      await selectSession(list[0].ID);
+    }
   } catch (err) {
     el.innerHTML = '<div class="text-red-500 text-xs text-center py-4">加载会话失败<br/>' + escapeHtml(err.message) + '</div>';
   }
@@ -220,6 +225,8 @@ async function sendMessage() {
   let toolNameList = [];
   let finalSessionId = '';
   let streamingSucceeded = false;
+  // 流式过程中收到的工具调用/结果（按顺序），done 后统一写回会话历史，保证 rebuild 后保留
+  const streamEvents = [];
   // 打字机：当前 answer 气泡 DOM 引用（仅当还在当前会话时操作）
   let answerEl = null;
 
@@ -246,6 +253,8 @@ async function sendMessage() {
             // 维持"思考中"占位（已显示），不额外处理
             break;
           case 'tool_call':
+            // 记录到流式事件（done 后写会话历史），并实时渲染工具调用条
+            streamEvents.push({ kind: 'tool_call', content: (data && data.tool ? data.tool : '') , role: 'tool' });
             if (String(atSession) === String(currentSessionId)) {
               removeThinkingFromBox(box);
               const tc = buildToolCall('call', data && data.message ? data.message : (data && data.tool ? '正在调用 ' + data.tool + ' 工具…' : ''));
@@ -254,6 +263,8 @@ async function sendMessage() {
             }
             break;
           case 'tool_result':
+            // 记录到流式事件（done 后写会话历史），并实时渲染工具返回（折叠展示）
+            streamEvents.push({ kind: 'tool_result', content: (data && data.result ? data.result : ''), role: 'tool' });
             if (String(atSession) === String(currentSessionId)) {
               const tr = buildToolCall('result', data && data.result ? data.result : '');
               box.appendChild(tr);
@@ -293,11 +304,11 @@ async function sendMessage() {
       }
     }
 
-    // 写回目标会话状态（完整 answer + 工具调用）
+    // 写回目标会话状态：question + 工具调用/结果（streamEvents） + answer，保持真实时序
     const targetSt = sessionState(targetId);
     targetSt.pending = false;
-    if (toolNameList.length > 0) {
-      targetSt.history.push({ kind: 'tool_call', content: '调用了工具：' + toolNameList.join('、'), role: 'tool' });
+    for (var si = 0; si < streamEvents.length; si++) {
+      targetSt.history.push(streamEvents[si]);
     }
     targetSt.history.push({ kind: 'answer', content: fullAnswer || '', role: 'assistant' });
 
