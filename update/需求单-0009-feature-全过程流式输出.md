@@ -1,7 +1,7 @@
 # 需求单 0009（feature）：对话全过程流式输出（思考中 / 工具调用 / 逐字回答）
 
+- 状态：✅ **已实现并验证**（2026-08-19 落地：引擎过程事件回调 + handler SSE 输出 + 前端逐字流式渲染；单测/ mock 复现/全量回归通过；已提交推送 `origin/main`）
 - 类型：✨ **feature**（功能需求；0001-0004、0007-0008 为 feature，0005-0006 为 bugfix）
-- 状态：📋 **已立项，待实现**（2026-08-19 立项；方案、改动点、风险已评估，**尚未实施**）
 - 优先级：🟡 中（体验增强：当前对话为"全部算完一次性返回"，改造成"过程实时反馈 + 回答逐字输出"）
 - 模块：`llmclient`（SSE 流式解析）、`agent/engine`（过程事件回调 + Run 改造）、`api/handler/chat.go`（SSE 输出）、`web/js/chat.js`（fetch 流式渲染）、`api/service`（冷轨落库时机）
 - 创建日期：2026-08-19
@@ -156,3 +156,49 @@ event: done          data: {"session_id":"5","tool_calls":[...]}      # 结束�
 1. **落地节奏**：推荐"先阶段事件流（thinking/tool）→ 再逐字"；是否接受两步走，还是要一步到位？
 2. **触发方式**：前端总是请求流式（默认 stream=1），还是保留非流式开关？
 3. 回答的"逐字"粒度：按字符（中文友好）还是按 token（可能更细碎）？——倾向按字符（避免 token 切碎中文）。
+
+---
+
+## 十、实现与验证记录（2026-08-19 落地）
+
+### 10.1 实际落地方案（对上文第九节"待确认"的回答）
+
+按用户"实施回答全流式输出的改动"指示，本次**一步到位**实现全流程流式，并对第九节三个问题作出如下落地取舍：
+
+1. **落地节奏**：一步到位（阶段事件 + 逐字一次做完）。
+2. **触发方式**：前端 `sendMessage` **始终请求 `stream:true`**（`web/js/api.js` 新增 `streamSSE`，`web/js/chat.js` 改用流式）；后端 `POST /api/chat` 在 `stream=true` 时走 SSE 全流程流式，`stream` 缺省/为 false 时保持原一次性 JSON（向后兼容，现有测试/旧前端不受影响）。
+3. **逐字粒度**：**按字符（rune）**——handler 收到 `answer_text` 事件后，把完整回答按 `[]rune` 切分，逐个发 `delta`，中文不会切碎。
+
+### 10.2 实现的 SSE 事件协议
+
+```
+event: thinking      data: {"message":"正在思考…"}                 # 每次要调 LLM（ReAct 迭代）
+event: tool_call     data: {"tool":"knowledge_retrieve","message":"..."}
+event: tool_result   data: {"tool":"...","result":"..."}            # 工具返回原文（前端用需求单 0008 折叠展示）
+event: answer_token  data: {"delta":"字"}                          # 最终回答逐字（打字机）
+event: done          data: {"answer":"完整","session_id":"5","tool_calls":[...]}  # 收尾
+```
+
+### 10.3 涉及文件（已实现）
+
+| 文件 | 落地改动 |
+|---|---|
+| `agent/engine/progress.go` | **新增**：`ProgressEvent`/`ProgressFunc`/事件类型常量 + `SetProgress` |
+| `agent/engine/engine.go` | `ReActEngine.Progress` 字段 + `emitProgress`；`Run` 在 thinking/tool_call/tool_result/final_answer/兜底处上报事件；新增 `toolNames` |
+| `api/handler/chat.go` | `ChatRequest.Stream` 字段；`streamChat`（SSE writer）+ `sseWriter.progressToSSE`（answer 逐字 rune）+ 原有非流式 JSON 路径保留；流式路径 `SetProgress` 后 `Run`，结束还原 nil |
+| `api/handler/chat_stream_test.go` | **新增** handler 层 SSE 格式单测 |
+| `agent/engine/progress_test.go` | **新增** 引擎层事件序列单测 |
+| `web/js/api.js` | **新增** `streamSSE`（fetch + ReadableStream 读 SSE，`event:`/`data:` 分派，兼容非流式 JSON 兜底）|
+| `web/js/chat.js` | `sendMessage` 改流式：thinking/tool_call/tool_result 增量渲染；`answer_token` 逐字打字机（`buildBubble` 增加 `.bubble-text`）；`done` 收集完整 answer 写回会话状态并 `renderCurrent`；404/鉴权/失败兜底 |
+
+### 10.4 验证记录
+
+- **引擎层** `TestProgress_EventSequence`：一次带工具的对话事件序列 = `thinking → tool_call → tool_result → thinking → answer_text → done`，done 携带完整 answer + tool_calls + session_id（PASS）；`TestProgress_NilCallback`（未注入回调不 panic、向后兼容）PASS。
+- **handler 层** `TestSSEWriter_FullFlow`：SSE 格式 `event:/data:/\n\n`、answer 逐字 `delta`、done 收尾均正确；`NoProgress` 无输出（PASS）。
+- **前端** mock：`streamSSE` 分批读流能正确拼接、`thinking/tool_call/answer_token×N/done` 事件序列正确、逐字组装 `=你好`、done 数据完整（PASS）。
+- **后端** `go vet ./...` / `go build ./...` / `go test ./...` 全绿；非流式 JSON 路径保留，现有测试全过。
+- **运行时**：8081 已重启到最新版，`/health` 200，SSE 流式路由生效。
+
+### 10.5 提交记录
+
+- （见 git 历史）feat(流式): 全流程流式输出——引擎过程事件回调 + handler SSE + 前端逐字渲染 + 测试
