@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -38,6 +40,7 @@ func SetAgentEngine(e *engine.ReActEngine) {
 type ChatRequest struct {
 	SessionID string `json:"session_id"`                              // 会话 ID（数据库会话主键的字符串形式；空则自动创建新会话）
 	Query     string `json:"query" binding:"required,min=1,max=2000"` // 用户提问（必填，长度 1~2000）
+	Stream    bool   `json:"stream"`                                  // 是否流式输出（SSE）；true=全流程流式，false=一次性返回
 }
 
 // defaultSessionTitle 新会话的默认标题：取首句话前 N 个字，便于列表辨识
@@ -118,13 +121,20 @@ func Chat(c *gin.Context) {
 	if tid := interfaces.TraceIDFromCtx(c.Request.Context()); tid != "" {
 		actx = *actx.WithTraceID(tid)
 	}
+
+	// 6. 根据是否流式，走两条分支
+	if req.Stream {
+		streamChat(c, actx, req.Query, sessionID)
+		return
+	}
+
 	resp, err := agentEngine.Run(actx, req.Query)
 	if err != nil {
 		response.ServerError(c, err.Error())
 		return
 	}
 
-	// 6. 返回回答 + 过程辅助信息
+	// 7. 返回回答 + 过程辅助信息
 	toolNames := make([]string, 0, len(resp.ToolCalls))
 	for _, tc := range resp.ToolCalls {
 		toolNames = append(toolNames, tc.ToolName)
@@ -142,4 +152,106 @@ func Chat(c *gin.Context) {
 		"session_id": sessionID,
 		"tool_calls": toolNames,
 	})
+}
+
+// sseWriter 把引擎 ProcessEvent 转为 SSE 事件写往 c.Writer（需求单 0009 全流程流式）。
+// 事件格式：event:<type>\ndata:<json>\n\n
+type sseWriter struct {
+	c   *gin.Context
+	fl  http.Flusher
+	err error
+}
+
+// enable 设置 SSE 响应头，返回 Flusher（不支持的响应则返回 false，调用方应降级为一次性返回）。
+func (w *sseWriter) enable() bool {
+	w.c.Header("Content-Type", "text/event-stream")
+	w.c.Header("Cache-Control", "no-cache")
+	w.c.Header("Connection", "keep-alive")
+	fl, ok := w.c.Writer.(http.Flusher)
+	w.fl = fl
+	return ok
+}
+
+// write 写一条 SSE 事件并 flush。
+func (w *sseWriter) write(evType string, payload []byte) {
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.c.Writer.Write([]byte("event: " + evType + "\n"))
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.c.Writer.Write([]byte("data: " + string(payload) + "\n\n"))
+	if w.err == nil && w.fl != nil {
+		w.fl.Flush()
+	}
+}
+
+// writeJSON 写一条 data 为 JSON 的 SSE 事件。
+func (w *sseWriter) writeJSON(evType string, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	w.write(evType, b)
+}
+
+// progressToSSE 把引擎 ProcessEvent 转成 SSE 写出的回调。
+// 逐字输出：收到 answer_text 事件时，把完整回答按字（rune）切分，逐字发 answer_token；
+// 结束时发 done（含完整 answer / tool_calls / session_id）。
+func (w *sseWriter) progressToSSE(sessionID string) engine.ProgressFunc {
+	return func(ev engine.ProgressEvent) {
+		switch ev.Type {
+		case engine.ProgressThinking:
+			w.writeJSON("thinking", gin.H{"message": ev.Message})
+		case engine.ProgressToolCall:
+			w.writeJSON("tool_call", gin.H{"tool": ev.ToolName, "message": ev.Message})
+		case engine.ProgressToolResult:
+			w.writeJSON("tool_result", gin.H{"tool": ev.ToolName, "result": ev.Result})
+		case engine.ProgressAnswerText:
+			// 逐字输出打字机：把整段回答按 rune 逐个发 answer_token
+			runes := []rune(ev.Text)
+			for _, r := range runes {
+				w.writeJSON("answer_token", gin.H{"delta": string(r)})
+			}
+		case engine.ProgressDone:
+			w.writeJSON("done", gin.H{
+				"answer":     ev.Answer,
+				"session_id": sessionID,
+				"tool_calls": ev.ToolCalls,
+			})
+		}
+	}
+}
+
+// streamChat 以 SSE 全流程流式处理一次对话（需求单 0009）。
+// 说明：引擎在 Run 内通过 Progress 回调逐步上报"思考/工具/回答"，这里转成 SSE 写给前端。
+// 冷轨完整历史（persistFullHistory）仍在引擎 Run 内部落库，不受此影响。
+func streamChat(c *gin.Context, actx engine.AgentContext, query, sessionID string) {
+	sw := &sseWriter{c: c}
+	if !sw.enable() {
+		// 响应不支持流式（异常），退回一次性返回兜底
+		resp, err := agentEngine.Run(actx, query)
+		if err != nil {
+			response.ServerError(c, err.Error())
+			return
+		}
+		response.Success(c, gin.H{"answer": resp.Answer, "session_id": sessionID, "tool_calls": resp.ToolCalls})
+		return
+	}
+
+	// 注入流式回调，跑引擎
+	agentEngine.SetProgress(sw.progressToSSE(sessionID))
+	_, err := agentEngine.Run(actx, query)
+	agentEngine.SetProgress(nil) // 还原，避免污染后续非流式请求
+
+	if err != nil {
+		// Run 返回错误（正常情况下引擎内部已降级为兜底 answer；这里兜底补一条 done 保证前端能收尾）
+		sw.writeJSON("done", gin.H{"answer": "", "session_id": sessionID, "tool_calls": nil, "error": err.Error()})
+		return
+	}
+	// 正常情况下 done 已由引擎的 ProgressDone 发出；Run 返回后再补 flush 确保完整
+	if sw.err == nil && sw.fl != nil {
+		sw.fl.Flush()
+	}
 }

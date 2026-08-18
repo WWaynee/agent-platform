@@ -82,6 +82,10 @@ type ReActEngine struct {
 	// fullHistorySink 冷轨完整历史落库接口（可选）。nil 则整条冷轨链路静默跳过，
 	// 不影响热轨对话（见 SetFullHistorySink / persistFullHistory）。
 	fullHistorySink FullHistorySink
+
+	// Progress 过程进度回调（需求单 0009 全流程流式）。nil 安全：未注入则 Run 内跳过，
+	// 不影响原有同步返回。由 handler 层注入 SSE writer 实现"思考中/工具调用/逐字回答"实时反馈。
+	Progress ProgressFunc
 }
 
 // SetFullHistorySink 注入冷轨完整历史落库 sink。
@@ -157,6 +161,9 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 			zap.Int("iteration", iter+1),
 			zap.Int("max_iterations", e.MaxIterations))
 
+		// 过程事件：通知外部"正在思考…"（本轮要调 LLM）
+		e.emitProgress(ProgressEvent{Type: ProgressThinking, Message: "正在思考…"})
+
 		// a. 调 LLM 生成下一步输出（想）
 		//    用携带租户/用户/trace_id 标识的 ctx 调用，让下游用量统计/配额/日志能从 ctx 提取归属。
 		//    ⚠️ 不复用 context.Background() 直接裸用——改为基于上下文构造，避免丢失 trace_id。
@@ -165,7 +172,10 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		if err != nil {
 			// LLM 调用失败 → 降级：不 panic、不裸抛错误，改返回友好兜底回答，
 			// 并把原始错误塞进 meta 供审计（answer 对用户友好，错误详情对开发可见）。
-			resp := &AgentResponse{Answer: "抱歉，模型服务暂时不可用，请稍后再试。"}
+			answer := "抱歉，模型服务暂时不可用，请稍后再试。"
+			e.emitProgress(ProgressEvent{Type: ProgressAnswerText, Text: answer})
+			e.emitProgress(ProgressEvent{Type: ProgressDone, Answer: answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
+			resp := &AgentResponse{Answer: answer}
 			resp.ToolCalls = calls
 			resp.WithMeta("error", fmt.Errorf("调用 LLM 失败: %w", err))
 			return resp, nil
@@ -189,14 +199,21 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 
 		// e. final_answer → 结束循环，返回答案
 		if parsed.Action == finalAnswerAction {
-			e.persist(ctx, query, parsed.Input, toolRecords)
-			return &AgentResponse{Answer: parsed.Input, ToolCalls: calls}, nil
+			answer := parsed.Input
+			// 过程事件：最终回答文本就绪 + 结束
+			e.emitProgress(ProgressEvent{Type: ProgressAnswerText, Text: answer})
+			e.emitProgress(ProgressEvent{Type: ProgressDone, Answer: answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
+			e.persist(ctx, query, answer, toolRecords)
+			return &AgentResponse{Answer: answer, ToolCalls: calls}, nil
 		}
 
 		// f/g. 工具调用：记录审计 + 经 ToolManager 统一执行（含租户权限校验）
 		//     统一解析一次参数，同时供 ToolCall 审计与 toolRecord 记录使用。
 		callParams := rawInputToParams(parsed.Input)
 		calls = append(calls, ToolCall{ToolName: parsed.Action, Params: callParams})
+
+		// 过程事件：正在调用某工具
+		e.emitProgress(ProgressEvent{Type: ProgressToolCall, Message: "正在调用 " + parsed.Action + " 工具…", ToolName: parsed.Action})
 
 		// 工具执行超时保护：为本次调用注入「带 deadline 的运行时 ctx」。
 		// 以携带 tenant/user/trace_id 的基准 ctx 派生，经 AgentContext.WithRuntimeContext
@@ -212,6 +229,8 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		if terr != nil {
 			out = fmt.Sprintf("工具 %q 执行失败: %v", parsed.Action, terr)
 		}
+		// 过程事件：工具已返回结果
+		e.emitProgress(ProgressEvent{Type: ProgressToolResult, Message: "工具 " + parsed.Action + " 已返回结果", ToolName: parsed.Action, Result: out})
 		// 收集工具调用记录（供冷轨落库 + 热轨模板化摘要）
 		toolRecords = append(toolRecords, toolRecord{
 			call:   ToolCall{ToolName: parsed.Action, Params: callParams},
@@ -236,8 +255,30 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 	// 5. 达到最大迭代：强制结束，返回最后一次内容（兜底收尾）
 	resp := e.fallbackResponse(lastRaw)
 	resp.ToolCalls = calls // 兜底响应也需要附带本轮工具调用记录，避免丢失审计信息
+	// 过程事件：兜底收尾也推送回答文本与结束（保证前端流式链路完整）
+	e.emitProgress(ProgressEvent{Type: ProgressAnswerText, Text: resp.Answer})
+	e.emitProgress(ProgressEvent{Type: ProgressDone, Answer: resp.Answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
 	e.persist(ctx, query, resp.Answer, toolRecords)
 	return resp, nil
+}
+
+// emitProgress 按需上报一条过程事件。Progress 未注入（nil）时静默跳过，保持向后兼容。
+func (e *ReActEngine) emitProgress(ev ProgressEvent) {
+	if e.Progress != nil {
+		e.Progress(ev)
+	}
+}
+
+// toolNames 提取工具调用名称列表（供 done 事件携带）。
+func toolNames(calls []ToolCall) []string {
+	if len(calls) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(calls))
+	for _, c := range calls {
+		names = append(names, c.ToolName)
+	}
+	return names
 }
 
 // buildInitialMessages 组装首轮消息序列：system(角色+工具列表+格式) + 历史 + 当前提问。

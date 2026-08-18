@@ -79,3 +79,94 @@ class ApiError extends Error {
     this.data = data;
   }
 }
+
+// streamSSE 发起 SSE 流式请求（需求单 0009 全流程流式）。
+// @param path   相对路径（如 /api...，内部会加 API_BASE）
+// @param body   JSON 请求体
+// @param handlers 事件回调 { event: (name, data) => void }
+// @return Promise<{done:boolean}>（读取完毕即 resolve；HTTP/网络错误 reject）
+// 事件名称由后端 text/event-stream 的 "event:" 指定；"data:" 是 JSON。
+async function streamSSE(path, body, handlers) {
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+
+  let res;
+  try {
+    res = await fetch(API_BASE + path, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(body || {}),
+    });
+  } catch (e) {
+    throw new ApiError(-1, '网络错误，连接对话流失败', e);
+  }
+
+  // 鉴权失败
+  if (res.status === 401) {
+    if (!window.location.pathname.endsWith('/login.html')) {
+      clearAuth();
+      window.location.href = '/login.html';
+    }
+    throw new ApiError(401, '登录已失效，请重新登录');
+  }
+
+  // 非 SSE（可能后端不支持流式或出错）→ 按普通 JSON 读，交给调用方兜底
+  const contentType = (res.headers.get('content-type') || '');
+  if (!res.body || contentType.indexOf('text/event-stream') < 0) {
+    // 尝试读完整 JSON（{code,message,data}）
+    let data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
+    if (data && typeof data.code !== 'undefined' && data.code !== 0) {
+      throw new ApiError(data.code, data.message || '请求失败', data.data);
+    }
+    return { raw: data, streamed: false };
+  }
+
+  // 正常 SSE：逐行读
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  const evt = (handlers && handlers.event) || function () {};
+
+  // 解析一条 SSE：格式 event:<name>\ndata:<json>\n\n
+  function dispatch(name, dataStr) {
+    let payload = null;
+    const t = dataStr.trim();
+    if (t) {
+      try { payload = JSON.parse(t); } catch (e) { payload = null; }
+    }
+    evt(name, payload);
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // 按空行切分事件块
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      let name = '';
+      let dataStr = '';
+      const lines = block.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('event:')) name = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataStr = line.slice(5);
+        else if (line.startsWith(': ')) { /* comment / keep-alive 忽略 */ }
+      }
+      if (name || dataStr) dispatch(name, dataStr);
+    }
+  }
+  // 尾部残留块
+  if (buffer.trim()) {
+    let name = ''; let dataStr = '';
+    buffer.split('\n').forEach(function (line) {
+      if (line.startsWith('event:')) name = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataStr = line.slice(5);
+    });
+    if (name || dataStr) dispatch(name, dataStr);
+  }
+  return { streamed: true, done: true };
+}

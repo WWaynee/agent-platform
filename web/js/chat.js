@@ -211,56 +211,102 @@ async function sendMessage() {
   btn.disabled = true;
   input.value = '';
 
-  // resp 在 try/catch 间共享：请求可能失败，catch 需要知道 session 归属性
-  let resp = null;
+  // 流式过程：完整回答、工具调用清单、会话ID在 done 事件里收集
+  let fullAnswer = '';
+  let toolNameList = [];
+  let finalSessionId = '';
+  let streamingSucceeded = false;
+  // 打字机：当前 answer 气泡 DOM 引用（仅当还在当前会话时操作）
+  let answerEl = null;
+
+  // 若仍在发起会话，确保一个逐字渲染的 answer 气泡存在并返回它
+  function ensureAnswerEl() {
+    if (String(atSession) === String(currentSessionId) && !answerEl) {
+      answerEl = buildBubble('assistant', '');
+      box.appendChild(answerEl);
+    }
+    return answerEl;
+  }
 
   try {
-    resp = await api.post('/chat', {
+    const result = await streamSSE('/chat', {
       session_id: atSession ? atSession : null,
       query: query,
+      stream: true,
+    }, {
+      event: function (name, data) {
+        switch (name) {
+          case 'thinking':
+            // 维持思考占位（已显示）
+            break;
+          case 'tool_call':
+            if (String(atSession) === String(currentSessionId)) {
+              removeThinkingFromBox(box);
+              const tc = buildToolCall('call', data && data.message ? data.message : (data && data.tool ? '正在调用 ' + data.tool + ' 工具…' : ''));
+              box.appendChild(tc);
+              scrollToBottom();
+            }
+            break;
+          case 'tool_result':
+            if (String(atSession) === String(currentSessionId)) {
+              const tr = buildToolCall('result', data && data.result ? data.result : '');
+              box.appendChild(tr);
+              scrollToBottom();
+            }
+            break;
+          case 'answer_token':
+            // 逐字打字机：拼到回答文本，并追加到当前 DOM 气泡
+            fullAnswer += (data && data.delta) || '';
+            const el = ensureAnswerEl();
+            if (el) {
+              // 追加字（重设 textContent，简单稳定）
+              el.querySelector('.bubble-text').textContent = fullAnswer;
+              scrollToBottom();
+            }
+            break;
+          case 'done':
+            fullAnswer = (data && data.answer) || fullAnswer;
+            finalSessionId = data && data.session_id ? String(data.session_id) : finalSessionId;
+            if (data && Array.isArray(data.tool_calls)) toolNameList = data.tool_calls;
+            streamingSucceeded = true;
+            break;
+        }
+      }
     });
-    const newSessionId = String(resp.session_id);
-    // 目标会话：发送前有会话（atSession）则写回该会话；发送前无会话（新会话）则用后端返回的 newSessionId
-    const targetId = atSession ? String(atSession) : newSessionId;
 
-    // 若是新会话首次发送（atSession 为 null）：
-    //   - 建立 newSessionId 的会话状态（把 origin，即在占位 key('null') 里暂存的用户消息迁过来）；
-    //   - 仅当发送期间用户没有切走（currentSessionId 仍为 null）才把当前视图绑定到新会话；
-    //     若用户已手动切到别的会话则不抢占视图（只落状态，切回时可见）。
-    if (!atSession) {
+    // 收集完毕：确定目标会话
+    const newSessionId = finalSessionId || String(result && result.raw && result.raw.session_id ? result.raw.session_id : '');
+    const targetId = atSession ? String(atSession) : (newSessionId || currentSessionId || 'default');
+
+    // 新会话首次发送：迁移状态
+    if (!atSession && newSessionId) {
       sessions[newSessionId] = sessions['null'] || { history: [], pending: false };
       delete sessions['null'];
       if (currentSessionId === null || currentSessionId === undefined) {
         currentSessionId = newSessionId;
-        loadSessions(); // 刷新左侧出现新会话
+        loadSessions();
       }
     }
 
-    // 结果写回目标会话状态（无论当前是否还显示该会话），目标恒定 = 发起会话
+    // 写回目标会话状态（完整 answer + 工具调用）
     const targetSt = sessionState(targetId);
     targetSt.pending = false;
-    // 工具调用引导条
-    const toolNames = Array.isArray(resp.tool_calls) ? resp.tool_calls : [];
-    if (toolNames.length > 0) {
-      targetSt.history.push({ kind: 'tool_call', content: '调用了工具：' + toolNames.join('、'), role: 'tool' });
+    if (toolNameList.length > 0) {
+      targetSt.history.push({ kind: 'tool_call', content: '调用了工具：' + toolNameList.join('、'), role: 'tool' });
     }
-    targetSt.history.push({ kind: 'answer', content: resp.answer || '', role: 'assistant' });
+    targetSt.history.push({ kind: 'answer', content: fullAnswer || '', role: 'assistant' });
 
-    // 仅当发起会话仍是当前查看会话时才实时渲染 DOM；否则只更新状态，切回时 renderCurrent 会显示
+    // 仅当仍是当前会话才整体重渲染（确保与状态一致）
     if (String(targetId) === String(currentSessionId)) {
       renderCurrent();
     }
-    // 刷新会话列表（更新时间/标题）
     loadSessions();
   } catch (err) {
-    // 失败也写回目标会话：有 atSession 用发起会话；否则优先请求返回的 session_id；再退到当前会话兜底
-    const cur = atSession ? String(atSession) : (String(resp && resp.session_id ? resp.session_id : '') || (currentSessionId || 'default'));
+    // 失败：移除 thinking（若还在），写错误到目标会话
+    const cur = atSession ? String(atSession) : (currentSessionId || 'default');
     const targetSt = sessionState(cur);
     targetSt.pending = false;
-    // 新会话首条失败：占位 key('null') 里暂存的用户消息也需复位 pending，避免残留思考态
-    if (!atSession && sessions['null']) {
-      sessions['null'].pending = false;
-    }
+    if (!atSession && sessions['null']) sessions['null'].pending = false;
     targetSt.history.push({ kind: 'answer', content: '出错了：' + err.message, role: 'assistant' });
     if (String(cur) === String(currentSessionId)) {
       renderCurrent();
@@ -328,7 +374,7 @@ function buildBubble(role, text) {
     (isUser ? '' : '<div class="w-8 h-8 rounded-full bg-indigo-500 text-white flex items-center justify-center text-sm mr-2 shrink-0"><i class="fa-solid fa-robot"></i></div>') +
     '<div class="max-w-[75%] px-4 py-3 rounded-2xl text-sm shadow-sm break-words ' +
       (isUser ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-white text-gray-800 border rounded-bl-sm') + '">' +
-      escapeHtml(text) + '</div>';
+      '<span class="bubble-text">' + escapeHtml(text) + '</span></div>';
   return div;
 }
 
