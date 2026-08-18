@@ -183,11 +183,11 @@ event: done          data: {"answer":"完整","session_id":"5","tool_calls":[...
 
 | 文件 | 落地改动 |
 |---|---|
-| `agent/engine/progress.go` | **新增**：`ProgressEvent`/`ProgressFunc`/事件类型常量 + `SetProgress` |
-| `agent/engine/engine.go` | `ReActEngine.Progress` 字段 + `emitProgress`；`Run` 在 thinking/tool_call/tool_result/final_answer/兜底处上报事件；新增 `toolNames` |
-| `api/handler/chat.go` | `ChatRequest.Stream` 字段；`streamChat`（SSE writer）+ `sseWriter.progressToSSE`（answer 逐字 rune）+ 原有非流式 JSON 路径保留；流式路径 `SetProgress` 后 `Run`，结束还原 nil |
+| `agent/engine/progress.go` | **新增**：`ProgressEvent`/`ProgressFunc`/事件类型常量 |
+| `agent/engine/engine.go` | 新增 `RunWithProgress(ctx, query, progress)`：进度回调以**单次调用参数**传入 `run` 的局部 `emit` 闭包；`Run` 委托 `run(ctx,query,nil)`（向后兼容）；`run` 在 thinking/tool_call/tool_result/final_answer/兜底处上报事件；新增 `toolNames` |
+| `api/handler/chat.go` | `ChatRequest.Stream` 字段；`streamChat`（SSE writer）+ `sseWriter.progressToSSE`（answer 逐字 rune）+ 原有非流式 JSON 路径保留；流式路径调 `RunWithProgress(...)`（不再 `SetProgress` 全局注入）|
 | `api/handler/chat_stream_test.go` | **新增** handler 层 SSE 格式单测 |
-| `agent/engine/progress_test.go` | **新增** 引擎层事件序列单测 |
+| `agent/engine/progress_test.go` | **新增** 引擎层事件序列 + 并发隔离 + 串流断言测试 |
 | `web/js/api.js` | **新增** `streamSSE`（fetch + ReadableStream 读 SSE，`event:`/`data:` 分派，兼容非流式 JSON 兜底）|
 | `web/js/chat.js` | `sendMessage` 改流式：thinking/tool_call/tool_result 增量渲染；`answer_token` 逐字打字机（`buildBubble` 增加 `.bubble-text`）；`done` 收集完整 answer 写回会话状态并 `renderCurrent`；404/鉴权/失败兜底 |
 
@@ -202,3 +202,4 @@ event: done          data: {"answer":"完整","session_id":"5","tool_calls":[...
 ### 10.5 提交记录
 
 - （见 git 历史）feat(流式): 全流程流式输出——引擎过程事件回调 + handler SSE + 前端逐字渲染 + 测试
+- fix(流式): 并发安全——Progress 改 `RunWithProgress` 单次调用参数，消除全局 `SetProgress` 并发污染/死连接；补并发隔离与串流断言测试（`-race` 通过）
