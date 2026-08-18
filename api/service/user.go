@@ -20,8 +20,9 @@ import (
 //
 // 流程：① 校验租户存在 → ② 校验用户名是否已存在 → ③ 密码 bcrypt 哈希 → ④ 插入数据库 → 返回用户
 //
-// 角色规则：注册接口默认创建的是普通成员 member。只有调用方显式传 "admin" 才会创建管理员
-// （例如租户创建时由系统自动给租户建首个 admin；普通自助注册一律 member，防止自助注册提权）。
+// 角色规则：注册接口创建的是普通成员 member。⚠️ 公开注册**强制 member**，忽略调用方传入的
+// role（即使传 "admin" 也只落 member）——堵住「任意人凭 tenant_id 就能给该租户建管理员」的提权口子
+// （提权只允许走管理员专属接口 /api/admin/user，或建租户时系统自动生成首个 admin）。
 //
 // ⚠️ 多租户安全（对应需求单 0001）：注册是公开接口、只能靠前端自报 tenant_id，
 // 是全链路唯一信任前端自报 tenant_id 的口子。故必须校验该租户**存在**，
@@ -32,8 +33,25 @@ func Register(ctx context.Context, tenantID uint64, username, password, role str
 		return nil, err
 	}
 
+	// 公开注册一律创建普通成员 member：忽略调用方 role 参数，强制 member，
+	// 防止匿名提权为 admin（管理员账号只能由管理员专属接口或建租户流程产生）。
+	role = "member"
+
 	// 用默认连接执行注册（非事务场景：普通自助注册）。
 	return registerInTx(ctx, storage.DB, tenantID, username, password, role)
+}
+
+// CreateUserByAdmin 管理员为当前租户创建普通员工（member）。
+// ⚠️ 仅供管理员专属接口 /api/admin/user 调用：tenantID 由调用方（handler）从 JWT 取（即管理员所属租户），
+// 不相信前端 body 传入的租户。创建的用户**固定 member**（不允许管理员在此提权成 admin，管理员仍由
+// 建租户流程或额外超管接口产生）。
+func CreateUserByAdmin(ctx context.Context, tenantID uint64, username, password string) (*model.User, error) {
+	// 校验租户存在且启用
+	if err := ensureTenantActive(ctx, tenantID); err != nil {
+		return nil, err
+	}
+	// 固定创建普通成员 member
+	return registerInTx(ctx, storage.DB, tenantID, username, password, "member")
 }
 
 // registerInTx 在给定的 *gorm.DB（默认连接或事务句柄）内完成用户注册的核心逻辑：

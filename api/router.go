@@ -94,7 +94,8 @@ func NewRouter() *gin.Engine {
 			// 任务列表查询（租户管理员看本租户的异步处理任务，如文档解析进度）
 			admin.GET("/task/list", handler.ListTasks) // 分页任务列表（?page&page_size，按 id 倒序）
 
-			// 用户管理：后续阶段补充（统一放本组即自动受管理员中间件保护）
+			// 用户管理：管理员为当前租户创建普通员工（member）
+			admin.POST("/user", handler.AdminCreateUser) // 创建员工（tenant_id 从 JWT 取，固定 member）
 		}
 	}
 

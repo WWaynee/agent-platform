@@ -47,6 +47,28 @@
       <div id="usageBars"></div>
     </section>
 
+    <!-- 员工管理：管理员为当前租户创建普通用户 -->
+    <section class="bg-white rounded-xl shadow-sm p-6">
+      <h2 class="text-lg font-semibold text-gray-800 mb-2"><i class="fa-solid fa-user-plus text-green-500 mr-2"></i>员工管理</h2>
+      <p class="text-xs text-gray-400 mb-4">为当前租户创建普通成员（员工）。员工登录只需用户名 + 密码；用户名全局唯一，且员工为普通成员（member），不具备管理员权限。</p>
+      <div class="grid sm:grid-cols-3 gap-3">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">用户名</label>
+          <input id="empUsername" type="text" class="input-field" placeholder="员工用户名（2-64位，全局唯一）" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">密码</label>
+          <input id="empPassword" type="password" class="input-field" placeholder="至少 6 位" />
+        </div>
+        <div class="flex items-end">
+          <button onclick="createEmployee()" class="w-full bg-green-600 hover:bg-green-700 text-white py-2.5 rounded-lg font-medium">
+            <i class="fa-solid fa-user-plus mr-1"></i>创建员工
+          </button>
+        </div>
+      </div>
+      <p id="empResult" class="mt-3 text-sm"></p>
+    </section>
+
     <!-- 工具配置 -->
     <section class="bg-white rounded-xl shadow-sm p-6">
       <h2 class="text-lg font-semibold text-gray-800 mb-2"><i class="fa-solid fa-wand-magic-sparkles text-purple-500 mr-2"></i>Agent 工具配置</h2>

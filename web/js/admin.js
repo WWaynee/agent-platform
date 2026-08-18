@@ -1,6 +1,35 @@
 // ============ 管理后台逻辑 ============
 // 依赖 api.js / auth.js（已加载）。仅管理员角色可访问（页面已做角色拦截）。
 
+// 管理员为当前租户创建普通员工（member）
+async function createEmployee() {
+  const username = (document.getElementById('empUsername').value || '').trim();
+  const password = document.getElementById('empPassword').value;
+  const result = document.getElementById('empResult');
+  result.className = 'mt-3 text-sm';
+  if (!username || !password) {
+    result.className = 'mt-3 text-sm text-amber-600';
+    result.textContent = '请填写用户名和密码';
+    return;
+  }
+  if (password.length < 6) {
+    result.className = 'mt-3 text-sm text-amber-600';
+    result.textContent = '密码至少 6 位';
+    return;
+  }
+  try {
+    // 后端固定创建 member；tenant_id 由后端从 JWT 取
+    const data = await api.post('/admin/user', { username, password });
+    result.className = 'mt-3 text-sm text-green-600';
+    result.textContent = '✅ 创建成功：员工 ' + (data.username || username) + '（普通成员）已加入当前租户。';
+    document.getElementById('empUsername').value = '';
+    document.getElementById('empPassword').value = '';
+  } catch (err) {
+    result.className = 'mt-3 text-sm text-red-600';
+    result.textContent = '❌ 创建失败：' + String(err.message || err);
+  }
+}
+
 // 加载工具开关列表
 async function loadTools() {
   const el = document.getElementById('toolList');

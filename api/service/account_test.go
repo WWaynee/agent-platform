@@ -321,15 +321,15 @@ func TestRegister_ToExistingTenant(t *testing.T) {
 		t.Errorf("注册 member 应 role=member，实际 %q", mem.Role)
 	}
 
-	// 注册到已存在租户并显式 role=admin → 校验租户存在后仍创建成功（符合现状）
+	// 公开注册传 role=admin → 校验租户存在后创建，但**强制为 member**（堵提权：公开注册不允许建管理员）
 	adm, err := Register(context.Background(), tenant.ID, "existadm2", "Admin@123456", "admin")
 	if err != nil {
-		t.Fatalf("向存在租户注册 role=admin 应成功: %v", err)
+		t.Fatalf("向存在租户注册应成功: %v", err)
 	}
-	if adm.Role != "admin" {
-		t.Errorf("注册 role=admin 应 role=admin，实际 %q", adm.Role)
+	if adm.Role != "member" {
+		t.Errorf("公开注册传 role=admin 应被强制为 member（堵提权），实际 %q", adm.Role)
 	}
-	t.Log("✅ 向存在租户注册 member/admin 均成功，且校验租户存在")
+	t.Log("✅ 向存在租户注册成功；公开注册强制 member（传 admin 也被降为 member）")
 }
 
 // TestRegister_UsernameGloballyUnique 验证「注册用户名全局唯一」（用户补充要求）：
@@ -377,6 +377,49 @@ func TestRegister_UsernameGloballyUnique(t *testing.T) {
 		t.Errorf("租户B注册不同名用户应成功，实际: %v", err)
 	}
 	t.Log("✅ 用户名全局唯一：跨租户同名注册被拒，不同名注册正常")
+}
+
+// TestCreateUserByAdmin 验证管理员创建员工接口（需求：普通用户由管理员创建）。
+//  1. admin 为当前租户创建普通员工 → 成功，且**固定 member**（不因任何入参变成 admin）；
+//  2. 创建到不存在的租户 → 被拒；
+//  3. 用户名全局唯一：重复 → 被拒。
+func TestCreateUserByAdmin(t *testing.T) {
+	setupTestDB(t)
+	_ = config.Load()
+
+	name := randTenantName("emp")
+	tenant, _, err := RegisterTenant(context.Background(), name, "emp_admin", "Emp@123456")
+	if err != nil {
+		t.Fatalf("RegisterTenant 失败: %v", err)
+	}
+	defer cleanupTenant(t, tenant.ID)
+
+	// 1. 管理员为当前租户创建普通员工 → member
+	u, err := CreateUserByAdmin(context.Background(), tenant.ID, "emp_member", "Emp@123456")
+	if err != nil {
+		t.Fatalf("管理员创建员工失败: %v", err)
+	}
+	if u.Role != "member" {
+		t.Errorf("管理员创建员工应固定 member，实际 %q", u.Role)
+	}
+	if u.TenantID != tenant.ID {
+		t.Errorf("员工应属于当前租户 tenant_id=%d，实际 %d", tenant.ID, u.TenantID)
+	}
+	t.Logf("✅ 管理员创建员工成功：%s（role=%s）", u.Username, u.Role)
+
+	// 2. 创建到不存在的租户 → 被拒
+	if _, err := CreateUserByAdmin(context.Background(), 99999999, "emp_ghost", "Emp@123456"); err == nil {
+		t.Errorf("向不存在租户创建员工应被拒，实际成功")
+	} else {
+		t.Logf("✅ 不存在租户创建被拒: %v", err)
+	}
+
+	// 3. 用户名全局唯一：重复 → 被拒
+	if _, err := CreateUserByAdmin(context.Background(), tenant.ID, "emp_member", "Emp@123456"); err == nil {
+		t.Errorf("重复用户名创建员工应被拒，实际成功")
+	} else {
+		t.Logf("✅ 重复用户名创建员工被拒: %v", err)
+	}
 }
 
 // ===== 测试辅助 =====
