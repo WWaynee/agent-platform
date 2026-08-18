@@ -143,9 +143,13 @@ function pushToSession(sid, m) {
 }
 
 function removeThinkingFromBox(box) {
-  const last = box.lastChild;
-  if (last && last.classList && last.classList.contains('thinking-bubble')) {
-    box.removeChild(last);
+  // 移除所有 thinking 气泡（不只看最后一个：可能已追加了 tool_call 等）
+  if (!box || !box.children) return;
+  for (var i = box.children.length - 1; i >= 0; i--) {
+    var child = box.children[i];
+    if (child && child.classList && child.classList.contains('thinking-bubble')) {
+      box.removeChild(child);
+    }
   }
 }
 
@@ -220,8 +224,10 @@ async function sendMessage() {
   let answerEl = null;
 
   // 若仍在发起会话，确保一个逐字渲染的 answer 气泡存在并返回它
+  // 创建 answer 气泡前先把"思考中"占位移除，避免答案显示在思考框之后。
   function ensureAnswerEl() {
     if (String(atSession) === String(currentSessionId) && !answerEl) {
+      removeThinkingFromBox(box);
       answerEl = buildBubble('assistant', '');
       box.appendChild(answerEl);
     }
@@ -237,7 +243,7 @@ async function sendMessage() {
       event: function (name, data) {
         switch (name) {
           case 'thinking':
-            // 维持思考占位（已显示）
+            // 维持"思考中"占位（已显示），不额外处理
             break;
           case 'tool_call':
             if (String(atSession) === String(currentSessionId)) {
@@ -255,11 +261,10 @@ async function sendMessage() {
             }
             break;
           case 'answer_token':
-            // 逐字打字机：拼到回答文本，并追加到当前 DOM 气泡
+            // 逐字打字机：先移除"思考中"占位，再拼字到回答气泡
             fullAnswer += (data && data.delta) || '';
             const el = ensureAnswerEl();
             if (el) {
-              // 追加字（重设 textContent，简单稳定）
               el.querySelector('.bubble-text').textContent = fullAnswer;
               scrollToBottom();
             }
