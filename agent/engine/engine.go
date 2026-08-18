@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-platform/agent/interfaces"
 	"agent-platform/agent/memory"
 	"agent-platform/agent/toolmanager"
 	"agent-platform/observability"
@@ -306,11 +307,18 @@ func (e *ReActEngine) persistFullHistory(ctx AgentContext, query, answer string,
 	}
 	appendMsg("assistant", "answer", answer)
 
-	// 异步后台写入：基于 AgentContext 译出的标准 ctx 派生（保留 trace_id/tenant_id/user_id），
-	// 不能复用请求上下文（请求结束会被 cancel）。每条失败只 warn、不阻塞。
+	// 异步后台写入：必须使用**独立的长寿 ctx**（不受请求结束取消 / 工具超时 deadline 影响）。
+	// ⚠️ 不能用 ctx.ToContext(nil)——若本轮调过工具，ctx 的 rctx 已被工具执行时
+	//    WithRuntimeContext(toolCtx) 污染为「带 ToolTimeout deadline 的 ctx」，该 deadline 在
+	//    工具返回后立即 cancel()，导致这里的异步写库全部报 context canceled、冷轨历史一条都落不了库
+	//    （表现为前端历史丢失/刷新为空）。故此处显式基于 context.Background() 组装，
+	//    仅保留 tenant/user/trace_id 供日志与审计使用。
+	base := interfaces.WithTenantUser(context.Background(), ctx.TenantID, ctx.UserID)
+	if tid := ctx.TraceID(); tid != "" {
+		base = interfaces.WithTraceID(base, tid)
+	}
+	alogger := observability.WithAgentContext(ctx)
 	go func() {
-		base := ctx.ToContext(nil) // 带 tenant/user/trace_id 的标准 ctx
-		alogger := observability.WithAgentContext(ctx)
 		for _, m := range msgs {
 			if err := sink.Append(base, m); err != nil {
 				alogger.Warn("写完整历史失败",

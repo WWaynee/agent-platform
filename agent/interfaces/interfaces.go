@@ -25,12 +25,30 @@ type AgentContext struct {
 
 // WithRuntimeContext 注入一个"运行时标准 ctx"，可承载 deadline / cancellation。
 // 后续调用 ToContext 时会优先以它为基准（而非新建空白 ctx），使超时/取消信号能沿
-// LLM/工具等下游调用链下传。返回同实例（链式可用）。
+// LLM/工具等下游调用链下传。
+//
+// ⚠️ **返回 AgentContext 副本而非修改原对象**（2026-08 修复）：原先链式返回同实例会把传入的
+//    运行时 ctx（常为「带 ToolTimeout deadline 的 ctx」）**永久污染到调用方持有的原 AgentContext
+//    （rctx 字段）**，导致后续 `ToContext(nil)` 复用该带 deadline/cancel 的 ctx——工具返回后
+//    cancel() 随之触发，使同一会话下一轮的 LLM 调用立即 `context deadline exceeded`（表现为
+//    "模型服务暂时不可用"），并使异步冷轨写库全部 `context canceled`（历史丢失）。
+//    改为返回副本后，运行时 ctx 只作用于本次返回的副本（工具内可感知超时），不污染原 ctx。
 func (c *AgentContext) WithRuntimeContext(ctx context.Context) *AgentContext {
+	out := c.copyAsValue()
 	if ctx != nil {
-		c.rctx = ctx
+		out.rctx = ctx
 	}
-	return c
+	return &out
+}
+
+// copyAsValue 返回 AgentContext 的字段副本（值）。用于需要"局部携带某个运行时 ctx
+// 而不污染原对象"的场景（如 WithRuntimeContext 注入工具超时 ctx 时只作用于派生的副本）。
+func (c *AgentContext) copyAsValue() AgentContext {
+	if c == nil {
+		return AgentContext{}
+	}
+	out := *c
+	return out
 }
 
 // RuntimeContext 返回此前注入的运行时标准 ctx；未注入时返回 nil。
