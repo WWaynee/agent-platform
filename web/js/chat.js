@@ -332,18 +332,56 @@ function buildBubble(role, text) {
   return div;
 }
 
+// 工具返回预览截断阈值（字符）：超过则折叠显示，点击展开/收起
+const TOOL_RESULT_PREVIEW_CHARS = 100;
+
 function buildToolCall(type, content) {
   const div = document.createElement('div');
   const isCall = type === 'call';
   div.className = 'flex justify-center mb-2';
   const icon = isCall ? 'fa-wand-magic-sparkles' : (type === 'system' ? 'fa-box-archive' : 'fa-receipt');
   const color = isCall ? 'text-sky-600' : (type === 'system' ? 'text-gray-500' : 'text-amber-600');
+  const isResult = type === 'result';
+
   div.innerHTML =
     '<div class="max-w-[85%] bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs flex items-start gap-2 ' + color + '">' +
       '<i class="fa-solid ' + icon + ' mt-0.5"></i>' +
       '<div class="flex-1 min-w-0"><div class="text-gray-500 mb-0.5">' +
         (isCall ? '🔧 正在调用工具…' : (type === 'system' ? '系统消息：' : '📄 工具返回：')) +
-      '</div>' + escapeHtml(content) + '</div>' +
+      '</div>' +
+      '<div class="tool-result-body whitespace-pre-wrap break-words"></div>' +
+      (isResult ? '<button class="tool-result-toggle mt-1 text-sky-600 hover:text-sky-800 font-medium"></button>' : '') +
+      '</div>' +
     '</div>';
+
+  if (isResult) {
+    // tool_result：默认截断预览 + 点击展开/收起完整内容
+    const full = String(content == null ? '' : content);
+    const bodyEl = div.querySelector('.tool-result-body');
+    const toggleEl = div.querySelector('.tool-result-toggle');
+    let expanded = false;
+
+    function renderResult() {
+      if (expanded) {
+        bodyEl.textContent = full;
+        toggleEl.textContent = '▲ 收起';
+      } else {
+        bodyEl.textContent = full.length > TOOL_RESULT_PREVIEW_CHARS
+          ? full.slice(0, TOOL_RESULT_PREVIEW_CHARS) + '…'
+          : full;
+        toggleEl.style.display = full.length > TOOL_RESULT_PREVIEW_CHARS ? '' : 'none';
+        if (full.length > TOOL_RESULT_PREVIEW_CHARS) toggleEl.textContent = '▼ 展开';
+      }
+    }
+    toggleEl.addEventListener('click', function () {
+      expanded = !expanded;
+      renderResult();
+    });
+    renderResult();
+  } else {
+    // tool_call / system：保持完整展示
+    const bodyEl = div.querySelector('.tool-result-body');
+    bodyEl.textContent = String(content == null ? '' : content);
+  }
   return div;
 }
