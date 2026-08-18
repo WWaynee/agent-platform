@@ -82,10 +82,6 @@ type ReActEngine struct {
 	// fullHistorySink 冷轨完整历史落库接口（可选）。nil 则整条冷轨链路静默跳过，
 	// 不影响热轨对话（见 SetFullHistorySink / persistFullHistory）。
 	fullHistorySink FullHistorySink
-
-	// Progress 过程进度回调（需求单 0009 全流程流式）。nil 安全：未注入则 Run 内跳过，
-	// 不影响原有同步返回。由 handler 层注入 SSE writer 实现"思考中/工具调用/逐字回答"实时反馈。
-	Progress ProgressFunc
 }
 
 // SetFullHistorySink 注入冷轨完整历史落库 sink。
@@ -129,16 +125,27 @@ func NewReActEngine(llm LLMClient, tools *toolmanager.ToolManager, mem memory.Me
 	}
 }
 
-// Run 执行一次 ReAct 调度，是引擎对外的主入口。
+// Run 执行一次 ReAct 调度，是引擎对外的主入口（不带过程进度回调，等效 RunWithProgress(...,nil)）。
 // 输入一次用户提问(query)与执行上下文(ctx)，返回最终回答与过程元信息。
-//
-// 核心循环（思考→行动→观察，最多 MaxIterations 轮）：
-//  1. 从 Memory 读该会话历史；组装 system(角色+工具列表+格式) + 历史 + 当前问题。
-//  2. 调 LLM 得到一段输出 → 解析为 {action, action_input}。
-//  3. final_answer → 结束；否则当工具调用执行，把结果(观察)喂回上下文继续下一轮。
-//  4. 解析失败 → 塞回纠错提示重试(最多1次)；达最大轮次 → 强制兜底收尾。
-//  5. 把本次 user 提问与 assistant 回答写回 Memory。
 func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error) {
+	return e.run(ctx, query, nil)
+}
+
+// RunWithProgress 执行一次 ReAct 调度，并逐步上报过程进度事件（全流程流式，需求单 0009）。
+// progress 为 nil 时与 Run 行为一致（向后兼容）。进度回调是【单次调用级别】的，
+// 由调用方在本次 Run 内传入——不存在跨请求共享，从根上避免并发污染。
+func (e *ReActEngine) RunWithProgress(ctx AgentContext, query string, progress ProgressFunc) (*AgentResponse, error) {
+	return e.run(ctx, query, progress)
+}
+
+// run 是 ReAct 主调度的具体实现；progress 为该次调用的过程进度回调（nil 安全）。
+func (e *ReActEngine) run(ctx AgentContext, query string, progress ProgressFunc) (*AgentResponse, error) {
+	// emit 按需上报一条过程事件（progress==nil 则静默跳过）
+	emit := func(ev ProgressEvent) {
+		if progress != nil {
+			progress(ev)
+		}
+	}
 	// 1. 从 Memory 读取该会话历史（正序）；带 tenantID 实现"按租户+会话"隔离存取
 	history := e.Memory.GetHistory(ctx.TenantID, ctx.SessionID)
 
@@ -162,7 +169,7 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 			zap.Int("max_iterations", e.MaxIterations))
 
 		// 过程事件：通知外部"正在思考…"（本轮要调 LLM）
-		e.emitProgress(ProgressEvent{Type: ProgressThinking, Message: "正在思考…"})
+		emit(ProgressEvent{Type: ProgressThinking, Message: "正在思考…"})
 
 		// a. 调 LLM 生成下一步输出（想）
 		//    用携带租户/用户/trace_id 标识的 ctx 调用，让下游用量统计/配额/日志能从 ctx 提取归属。
@@ -173,8 +180,8 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 			// LLM 调用失败 → 降级：不 panic、不裸抛错误，改返回友好兜底回答，
 			// 并把原始错误塞进 meta 供审计（answer 对用户友好，错误详情对开发可见）。
 			answer := "抱歉，模型服务暂时不可用，请稍后再试。"
-			e.emitProgress(ProgressEvent{Type: ProgressAnswerText, Text: answer})
-			e.emitProgress(ProgressEvent{Type: ProgressDone, Answer: answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
+			emit(ProgressEvent{Type: ProgressAnswerText, Text: answer})
+			emit(ProgressEvent{Type: ProgressDone, Answer: answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
 			resp := &AgentResponse{Answer: answer}
 			resp.ToolCalls = calls
 			resp.WithMeta("error", fmt.Errorf("调用 LLM 失败: %w", err))
@@ -201,8 +208,8 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		if parsed.Action == finalAnswerAction {
 			answer := parsed.Input
 			// 过程事件：最终回答文本就绪 + 结束
-			e.emitProgress(ProgressEvent{Type: ProgressAnswerText, Text: answer})
-			e.emitProgress(ProgressEvent{Type: ProgressDone, Answer: answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
+			emit(ProgressEvent{Type: ProgressAnswerText, Text: answer})
+			emit(ProgressEvent{Type: ProgressDone, Answer: answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
 			e.persist(ctx, query, answer, toolRecords)
 			return &AgentResponse{Answer: answer, ToolCalls: calls}, nil
 		}
@@ -213,7 +220,7 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 		calls = append(calls, ToolCall{ToolName: parsed.Action, Params: callParams})
 
 		// 过程事件：正在调用某工具
-		e.emitProgress(ProgressEvent{Type: ProgressToolCall, Message: "正在调用 " + parsed.Action + " 工具…", ToolName: parsed.Action})
+		emit(ProgressEvent{Type: ProgressToolCall, Message: "正在调用 " + parsed.Action + " 工具…", ToolName: parsed.Action})
 
 		// 工具执行超时保护：为本次调用注入「带 deadline 的运行时 ctx」。
 		// 以携带 tenant/user/trace_id 的基准 ctx 派生，经 AgentContext.WithRuntimeContext
@@ -230,7 +237,7 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 			out = fmt.Sprintf("工具 %q 执行失败: %v", parsed.Action, terr)
 		}
 		// 过程事件：工具已返回结果
-		e.emitProgress(ProgressEvent{Type: ProgressToolResult, Message: "工具 " + parsed.Action + " 已返回结果", ToolName: parsed.Action, Result: out})
+		emit(ProgressEvent{Type: ProgressToolResult, Message: "工具 " + parsed.Action + " 已返回结果", ToolName: parsed.Action, Result: out})
 		// 收集工具调用记录（供冷轨落库 + 热轨模板化摘要）
 		toolRecords = append(toolRecords, toolRecord{
 			call:   ToolCall{ToolName: parsed.Action, Params: callParams},
@@ -256,17 +263,10 @@ func (e *ReActEngine) Run(ctx AgentContext, query string) (*AgentResponse, error
 	resp := e.fallbackResponse(lastRaw)
 	resp.ToolCalls = calls // 兜底响应也需要附带本轮工具调用记录，避免丢失审计信息
 	// 过程事件：兜底收尾也推送回答文本与结束（保证前端流式链路完整）
-	e.emitProgress(ProgressEvent{Type: ProgressAnswerText, Text: resp.Answer})
-	e.emitProgress(ProgressEvent{Type: ProgressDone, Answer: resp.Answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
+	emit(ProgressEvent{Type: ProgressAnswerText, Text: resp.Answer})
+	emit(ProgressEvent{Type: ProgressDone, Answer: resp.Answer, ToolCalls: toolNames(calls), SessionID: ctx.SessionID})
 	e.persist(ctx, query, resp.Answer, toolRecords)
 	return resp, nil
-}
-
-// emitProgress 按需上报一条过程事件。Progress 未注入（nil）时静默跳过，保持向后兼容。
-func (e *ReActEngine) emitProgress(ev ProgressEvent) {
-	if e.Progress != nil {
-		e.Progress(ev)
-	}
 }
 
 // toolNames 提取工具调用名称列表（供 done 事件携带）。

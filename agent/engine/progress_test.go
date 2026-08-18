@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestProgress_EventSequence 验证全流程流式进度事件序列（需求单 0009）：
@@ -24,7 +27,7 @@ func TestProgress_EventSequence(t *testing.T) {
 	var doneTools []string
 	var doneSession string
 
-	e.SetProgress(func(ev ProgressEvent) {
+	pf := func(ev ProgressEvent) {
 		types = append(types, ev.Type)
 		switch ev.Type {
 		case ProgressDone:
@@ -32,9 +35,10 @@ func TestProgress_EventSequence(t *testing.T) {
 			doneTools = ev.ToolCalls
 			doneSession = ev.SessionID
 		}
-	})
+	}
 
-	_, err := e.Run(AgentContext{TenantID: 1, SessionID: "p-seq"}, "请调用工具并回答")
+	// RunWithProgress 以单次调用参数传进度回调（验证 per-call 事件）
+	_, err := e.RunWithProgress(AgentContext{TenantID: 1, SessionID: "p-seq"}, "请调用工具并回答", pf)
 	if err != nil {
 		t.Fatalf("Run 不应报错: %v", err)
 	}
@@ -79,5 +83,51 @@ func TestProgress_NilCallback(t *testing.T) {
 	}
 	if resp.Answer != "ok" {
 		t.Fatalf("无回调时也应正常返回, got %q", resp.Answer)
+	}
+}
+
+// TestProgress_ConcurrentIsolation 并发回归（需求单 0009-修复）：
+// RunWithProgress 以「单次调用参数」传回调，多个并发请求各自收到自己的事件、互不串流。
+// （曾用引擎字段 SetProgress 会被并发覆盖，导致事件写到别的请求/死连接。）
+func TestProgress_ConcurrentIsolation(t *testing.T) {
+	const n = 8
+
+	doneCh := make(chan struct{})
+	errCh := make(chan error, n)
+
+	launch := func(i int) {
+		var got []ProgressEventType
+		sid := "c-" + strconv.Itoa(i)
+		// 每个 goroutine 独立 sequenceLLM：sequenceLLM.call 无锁，共享则 -race 数据竞争
+		llm := &sequenceLLM{replies: []string{fmt.Sprintf(`{"action":"final_answer","action_input":"ok-%d"}`, i)}}
+		eng := newTestEngineWith(llm, okTool{})
+		_, err := eng.RunWithProgress(AgentContext{TenantID: 1, SessionID: sid}, "hi", func(ev ProgressEvent) {
+			got = append(got, ev.Type)
+			if ev.Type == ProgressDone && ev.SessionID != sid {
+				errCh <- fmt.Errorf("请求 %d done 事件串流: 事件 session=%q 期望 %q", i, ev.SessionID, sid)
+			}
+		})
+		if err != nil {
+			errCh <- err
+			return
+		}
+		// 每个请求的事件序列应相同：thinking → answer_text → done
+		if len(got) != 3 || got[0] != ProgressThinking || got[1] != ProgressAnswerText || got[2] != ProgressDone {
+			errCh <- fmt.Errorf("请求 %d 事件序列异常: %v", i, got)
+			return
+		}
+		doneCh <- struct{}{}
+	}
+	for i := 0; i < n; i++ {
+		go launch(i)
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-doneCh:
+		case err := <-errCh:
+			t.Fatalf("并发请求出错: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("并发请求超时")
+		}
 	}
 }

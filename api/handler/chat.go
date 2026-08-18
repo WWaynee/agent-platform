@@ -240,10 +240,8 @@ func streamChat(c *gin.Context, actx engine.AgentContext, query, sessionID strin
 		return
 	}
 
-	// 注入流式回调，跑引擎
-	agentEngine.SetProgress(sw.progressToSSE(sessionID))
-	_, err := agentEngine.Run(actx, query)
-	agentEngine.SetProgress(nil) // 还原，避免污染后续非流式请求
+	// 全流程流式：以「单次调用参数」方式传进度回调，避免全局 SetProgress 被并发请求污染。
+	_, err := agentEngine.RunWithProgress(actx, query, sw.progressToSSE(sessionID))
 
 	if err != nil {
 		// Run 返回错误（正常情况下引擎内部已降级为兜底 answer；这里兜底补一条 done 保证前端能收尾）

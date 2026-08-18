@@ -49,8 +49,5 @@ type ProgressEvent struct {
 // ProgressFunc 引擎进度回调；nil 安全（外部未注入则跳过）。
 type ProgressFunc func(ProgressEvent)
 
-// SetProgress 注入引擎进度回调。nil 安全。
-// 由调用方（cmd/api 装配或 handler 层）注入；引擎 Run 内据此逐步上报阶段进展。
-func (e *ReActEngine) SetProgress(pf ProgressFunc) {
-	e.Progress = pf
-}
+// 说明：进度回调通过 RunWithProgress 以【单次调用参数】方式传入，
+// 不使用引擎字段（避免包级单例被并发请求互相覆盖，造成事件串流/死连接，见需求单 0009 修复）。
