@@ -55,6 +55,8 @@ func NewRouter() *gin.Engine {
 
 		// 文档下载/预览：返回 OSS 预签名 URL（需求单 0010）
 		private.GET("/document/:id/url", handler.GetDocumentURL)
+		// 文档内联预览：后端从 OSS 读回并返回 text/plain（保证浏览器内联展示，非下载）
+		private.GET("/document/:id/preview", handler.PreviewDocument)
 
 		// 异步任务状态查询（需登录，强制 tenant_id 过滤；前端轮询看处理进度）
 		private.GET("/task/:id", handler.GetTask)

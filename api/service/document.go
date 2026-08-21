@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"agent-platform/mq"
@@ -123,6 +125,28 @@ func GetDocumentAccessURL(ctx context.Context, tenantID, id uint64) (previewURL,
 		return "", "", "", fmt.Errorf("生成文档下载链接失败: %w", err)
 	}
 	return pu, du, doc.Name, nil
+}
+
+// GetDocumentPreview 读取文档全文用于内联预览（需求单 0010 review 修复：预览走后端代理，保证内联展示）。
+// 校验文档属于当前租户后从 OSS 读回全文，返回纯文本内容 + 文件名 + 内容类型。
+func GetDocumentPreview(ctx context.Context, tenantID, id uint64) (content, name, contentType string, err error) {
+	doc, err := storage.GetDocumentByID(ctx, tenantID, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", "", fmt.Errorf("文档不存在")
+		}
+		return "", "", "", fmt.Errorf("查询文档失败: %w", err)
+	}
+	data, err := storage.DownloadFile(doc.MinioObjectKey)
+	if err != nil {
+		return "", "", "", fmt.Errorf("读取文档内容失败: %w", err)
+	}
+	ct := "text/plain; charset=utf-8"
+	switch strings.ToLower(filepath.Ext(doc.Name)) {
+	case ".md":
+		ct = "text/markdown; charset=utf-8"
+	}
+	return string(data), doc.Name, ct, nil
 }
 
 // ctx 携带请求级 trace_id/tenant_id，透传给 storage。

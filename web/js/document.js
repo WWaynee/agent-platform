@@ -57,12 +57,22 @@ async function docAccessUrl(id) {
   return data; // { url, name }
 }
 
-// 预览：新页签打开签名 URL（txt/md 浏览器可直接文本预览，inline）
+// 预览：新页签内联展示文档内容（后端代理读 OSS，返回 text/plain，保证预览而非下载）
 async function previewDocument(id) {
   try {
-    const data = await docAccessUrl(id);
-    if (!data || !data.url) { toast('预览链接生成失败', 'error'); return; }
-    window.open(data.url, '_blank');
+    // 预览接口需鉴权，用 fetch 带 token 读后端代理返回的纯文本，再以 blob URL 内联打开
+    const res = await fetch(API_BASE + '/document/' + id + '/preview', {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + getToken() },
+    });
+    if (!res.ok) {
+      let msg = '预览失败(' + res.status + ')';
+      try { const j = await res.json(); if (j && j.message) msg = j.message; } catch (e) {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
   } catch (err) {
     toast('预览失败：' + err.message, 'error');
   }

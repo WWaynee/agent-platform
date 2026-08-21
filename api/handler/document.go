@@ -162,6 +162,27 @@ func GetDocumentURL(c *gin.Context) {
 	})
 }
 
+// PreviewDocument 内联预览文档（需求单 0010 review 修复：预览走后端代理，保证浏览器内联展示而非下载）
+// GET /api/document/:id/preview —— 后端从 OSS 读回全文，以 text/plain 且 Content-Disposition:inline 返回。
+// 多租户：tenant_id 从 JWT 拿，跨租户/不存在统一返回"文档不存在"。
+func PreviewDocument(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "无效的文档 ID")
+		return
+	}
+	tenantID := middleware.GetTenantID(c)
+	content, name, contentType, err := service.GetDocumentPreview(c.Request.Context(), tenantID, id)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", "inline")
+	c.Header("X-Document-Name", name)
+	c.String(200, content)
+}
+
 // DeleteDocument 删除文档
 // 路径参数：id
 // tenant_id 从 JWT 拿，强制过滤；先删 MinIO 文件再软删 DB 记录
