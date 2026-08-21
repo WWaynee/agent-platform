@@ -2,6 +2,8 @@ package handler
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -174,7 +176,9 @@ func PreviewDocument(c *gin.Context) {
 	tenantID := middleware.GetTenantID(c)
 	content, name, contentType, err := service.GetDocumentPreview(c.Request.Context(), tenantID, id)
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		// 不向客户端回传内部（OSS/DB）细节；记录日志，返回通用消息（预览接口对前端以真实 4xx 区分成功/失败）
+		fmt.Printf("[PreviewDocument] tenant=%d doc=%d preview 失败: %v\n", tenantID, id, err)
+		response.FailStatus(c, 400, http.StatusBadRequest, "文档预览失败")
 		return
 	}
 	c.Header("Content-Type", contentType)

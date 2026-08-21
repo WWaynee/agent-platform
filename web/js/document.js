@@ -59,8 +59,10 @@ async function docAccessUrl(id) {
 
 // 预览：新页签内联展示文档内容（后端代理读 OSS，返回 text/plain，保证预览而非下载）
 async function previewDocument(id) {
+  let url = null;
   try {
-    // 预览接口需鉴权，用 fetch 带 token 读后端代理返回的纯文本，再以 blob URL 内联打开
+    // 预览接口需鉴权；用 fetch 带 token 读后端代理返回的纯文本，再以 blob URL 内联打开。
+    // 后端失败时返回真实 HTTP 4xx（response.FailStatus），故此处仅需 !res.ok 即可判断失败。
     const res = await fetch(API_BASE + '/document/' + id + '/preview', {
       method: 'GET',
       headers: { 'Authorization': 'Bearer ' + getToken() },
@@ -70,11 +72,14 @@ async function previewDocument(id) {
       try { const j = await res.json(); if (j && j.message) msg = j.message; } catch (e) {}
       throw new Error(msg);
     }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    const text = await res.text();
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    url = URL.createObjectURL(blob);
     window.open(url, '_blank');
   } catch (err) {
     toast('预览失败：' + err.message, 'error');
+  } finally {
+    if (url) setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
   }
 }
 
