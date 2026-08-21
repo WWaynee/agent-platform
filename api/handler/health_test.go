@@ -20,12 +20,12 @@ func TestHealthHandler_DownReturns503(t *testing.T) {
 
 	// 保存并清空全局依赖，模拟"服务依赖全部不可用（故意停掉）"
 	origDB, origRDB := storage.DB, storage.RDB
-	origMinio, origQdrant := storage.MinioClient, storage.QdrantClient
+	origMinio, origQdrant := storage.OSSClient, storage.QdrantClient
 	origConn, origCh := mq.MQConn, mq.MQCh
-	storage.DB, storage.RDB, storage.MinioClient, storage.QdrantClient = nil, nil, nil, nil
+	storage.DB, storage.RDB, storage.OSSClient, storage.QdrantClient = nil, nil, nil, nil
 	mq.MQConn, mq.MQCh = nil, nil
 	defer func() {
-		storage.DB, storage.RDB, storage.MinioClient, storage.QdrantClient = origDB, origRDB, origMinio, origQdrant
+		storage.DB, storage.RDB, storage.OSSClient, storage.QdrantClient = origDB, origRDB, origMinio, origQdrant
 		mq.MQConn, mq.MQCh = origConn, origCh
 	}()
 
@@ -54,7 +54,7 @@ func TestHealthHandler_DownReturns503(t *testing.T) {
 	if len(report.Components) != 5 {
 		t.Errorf("应返回 5 个组件，实际 %d", len(report.Components))
 	}
-	for _, name := range []string{"mysql", "redis", "minio", "qdrant", "rabbitmq"} {
+	for _, name := range []string{"mysql", "redis", "oss", "qdrant", "rabbitmq"} {
 		status, ok := report.Components[name]
 		if !ok {
 			t.Errorf("缺少组件 %s", name)

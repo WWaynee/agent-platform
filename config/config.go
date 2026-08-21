@@ -34,6 +34,15 @@ type MinIOConfig struct {
 	UseSSL    bool // 本地开发 false，线上走 HTTPS 为 true
 }
 
+// OSSConfig 阿里云对象存储（OSS）配置（需求单 0010：MinIO → 阿里云 OSS 迁移）。
+type OSSConfig struct {
+	Region      string // 地域，如 cn-shenzhen
+	Endpoint    string // 公网 endpoint，如 oss-cn-shenzhen.aliyuncs.com
+	AccessKeyID string // AccessKey ID
+	AccessKeySecret string // AccessKey Secret
+	Bucket      string // 存储桶名，如 my-agent-file
+}
+
 // Qdrant 配置
 type QdrantConfig struct {
 	Host string
@@ -123,6 +132,7 @@ type Config struct {
 	MySQL     MySQLConfig
 	Redis     RedisConfig
 	MinIO     MinIOConfig
+	OSS       OSSConfig
 	Qdrant    QdrantConfig
 	JWT       JWTConfig
 	LLM       LLMConfig
@@ -169,6 +179,15 @@ func Load() error {
 		SecretKey: getEnv("MINIO_SECRET_KEY", ""),
 		Bucket:    getEnv("MINIO_BUCKET", "document-store"),
 		UseSSL:    getEnvBool("MINIO_USE_SSL", false),
+	}
+
+	// OSS（阿里云对象存储，需求单 0010）
+	cfg.OSS = OSSConfig{
+		Region:          getEnv("OSS_REGION", "cn-hangzhou"),
+		Endpoint:        getEnv("OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com"),
+		AccessKeyID:     getEnv("OSS_ACCESS_KEY_ID", ""),
+		AccessKeySecret: getEnv("OSS_ACCESS_KEY_SECRET", ""),
+		Bucket:          getEnv("OSS_BUCKET", "document-store"),
 	}
 
 	// Qdrant

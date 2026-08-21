@@ -140,6 +140,27 @@ func GetDocumentDetail(c *gin.Context) {
 	response.Success(c, doc)
 }
 
+// GetDocumentURL 获取文档的 OSS 签名访问 URL（下载/预览，需求单 0010）
+// 返回 { url, name }：url 为短时效预签名直链，浏览器可直连 OSS 下载/预览该文档。
+// 多租户：tenant_id 从 JWT 拿，跨租户/不存在统一返回"文档不存在"。
+func GetDocumentURL(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "无效的文档 ID")
+		return
+	}
+	tenantID := middleware.GetTenantID(c)
+	url, name, err := service.GetDocumentAccessURL(c.Request.Context(), tenantID, id)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.Success(c, gin.H{
+		"url":  url,
+		"name": name,
+	})
+}
+
 // DeleteDocument 删除文档
 // 路径参数：id
 // tenant_id 从 JWT 拿，强制过滤；先删 MinIO 文件再软删 DB 记录

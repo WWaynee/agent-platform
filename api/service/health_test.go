@@ -13,14 +13,14 @@ func TestOverallUp(t *testing.T) {
 	dn := checkResult{status: StatusDown, errMsg: "某组件挂了"}
 
 	if !overallUp(map[string]checkResult{
-		"mysql": up, "redis": up, "minio": up, "qdrant": up, "rabbitmq": up,
+		"mysql": up, "redis": up, "oss": up, "qdrant": up, "rabbitmq": up,
 	}) {
 		t.Error("全部 up 应判定为健康")
 	}
 	t.Run("任一 down 即整体不健康", func(t *testing.T) {
-		for _, name := range []string{"mysql", "redis", "minio", "qdrant", "rabbitmq"} {
+		for _, name := range []string{"mysql", "redis", "oss", "qdrant", "rabbitmq"} {
 			comps := map[string]checkResult{
-				"mysql": up, "redis": up, "minio": up, "qdrant": up, "rabbitmq": up,
+				"mysql": up, "redis": up, "oss": up, "qdrant": up, "rabbitmq": up,
 			}
 			comps[name] = dn
 			if overallUp(comps) {
@@ -44,17 +44,17 @@ func TestOverallUp(t *testing.T) {
 // 用全局对象置 nil 模拟依赖不可用（等价于"故意停掉某依赖"）。
 func TestHealth_ComponentsDownWhenNotInit(t *testing.T) {
 	origDB, origRDB := storage.DB, storage.RDB
-	origMinio, origQdrant := storage.MinioClient, storage.QdrantClient
+	origMinio, origQdrant := storage.OSSClient, storage.QdrantClient
 	origConn, origCh := mq.MQConn, mq.MQCh
 	defer func() {
-		storage.DB, storage.RDB, storage.MinioClient, storage.QdrantClient = origDB, origRDB, origMinio, origQdrant
+		storage.DB, storage.RDB, storage.OSSClient, storage.QdrantClient = origDB, origRDB, origMinio, origQdrant
 		mq.MQConn, mq.MQCh = origConn, origCh
 	}()
 
 	// 全部依赖置为未初始化
 	storage.DB = nil
 	storage.RDB = nil
-	storage.MinioClient = nil
+	storage.OSSClient = nil
 	storage.QdrantClient = nil
 	mq.MQConn, mq.MQCh = nil, nil
 
@@ -69,7 +69,7 @@ func TestHealth_ComponentsDownWhenNotInit(t *testing.T) {
 
 	// components 应为字符串值 map，包含全部 5 个组件且都是 "down"；
 	// errors map 应包含每个 down 组件的错误信息。
-	for _, name := range []string{"mysql", "redis", "minio", "qdrant", "rabbitmq"} {
+	for _, name := range []string{"mysql", "redis", "oss", "qdrant", "rabbitmq"} {
 		status, ok := report.Components[name]
 		if !ok {
 			t.Errorf("缺少组件 %s", name)

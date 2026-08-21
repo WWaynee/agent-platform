@@ -37,10 +37,52 @@ function buildDocItem(d) {
         (d.Status === 'failed' && d.ErrorMsg ? '<div class="text-xs text-red-500 mt-0.5 truncate">' + escapeHtml(d.ErrorMsg) + '</div>' : '') +
       '</div>' +
     '</div>' +
-    '<button class="text-gray-300 hover:text-red-500 ml-2" title="删除文档" onclick="deleteDocument(' + d.ID + ')">' +
-      '<i class="fa-solid fa-trash-can"></i>' +
-    '</button>';
+    '<div class="flex items-center gap-1 ml-2 shrink-0">' +
+      '<button class="text-gray-400 hover:text-sky-600 text-sm" title="预览" onclick="previewDocument(' + d.ID + ')">' +
+        '<i class="fa-solid fa-eye"></i>' +
+      '</button>' +
+      '<button class="text-gray-400 hover:text-indigo-600 text-sm" title="下载" onclick="downloadDocument(' + d.ID + ')">' +
+        '<i class="fa-solid fa-download"></i>' +
+      '</button>' +
+      '<button class="text-gray-300 hover:text-red-500" title="删除文档" onclick="deleteDocument(' + d.ID + ')">' +
+        '<i class="fa-solid fa-trash-can"></i>' +
+      '</button>' +
+    '</div>';
   return div;
+}
+
+// 获取文档的 OSS 签名 URL
+async function docAccessUrl(id) {
+  const data = await api.get('/document/' + id + '/url');
+  return data; // { url, name }
+}
+
+// 预览：新页签打开签名 URL（txt/md 浏览器可直接文本预览）
+async function previewDocument(id) {
+  try {
+    const data = await docAccessUrl(id);
+    if (!data || !data.url) { toast('预览链接生成失败', 'error'); return; }
+    window.open(data.url, '_blank');
+  } catch (err) {
+    toast('预览失败：' + err.message, 'error');
+  }
+}
+
+// 下载：触发浏览器下载该文档
+async function downloadDocument(id) {
+  try {
+    const data = await docAccessUrl(id);
+    if (!data || !data.url) { toast('下载链接生成失败', 'error'); return; }
+    const a = document.createElement('a');
+    a.href = data.url;
+    a.download = data.name || '';
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } catch (err) {
+    toast('下载失败：' + err.message, 'error');
+  }
 }
 
 function statusText(s) {

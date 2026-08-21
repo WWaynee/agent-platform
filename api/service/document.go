@@ -102,7 +102,23 @@ func GetDocumentDetail(ctx context.Context, tenantID, id uint64) (*model.Documen
 	return doc, nil
 }
 
-// DeleteDocument 删除文档
+// GetDocumentAccessURL 生成文档的 OSS 预签名访问 URL（下载/预览用，需求单 0010）。
+// 校验文档属于当前租户后，取其 objectKey 生成短时效（1 小时）签名 URL，浏览器可直连 OSS。
+func GetDocumentAccessURL(ctx context.Context, tenantID, id uint64) (url string, name string, err error) {
+	doc, err := storage.GetDocumentByID(ctx, tenantID, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", fmt.Errorf("文档不存在")
+		}
+		return "", "", fmt.Errorf("查询文档失败: %w", err)
+	}
+	u, err := storage.PresignURL(doc.MinioObjectKey, time.Hour)
+	if err != nil {
+		return "", "", fmt.Errorf("生成文档访问链接失败: %w", err)
+	}
+	return u, doc.Name, nil
+}
+
 // ctx 携带请求级 trace_id/tenant_id，透传给 storage。
 // 流程：确认文档属于当前租户 → 校验拥有权（仅上传者可删）→ 删 MinIO 文件 → 软删数据库记录
 // 只删 DB 记录而保留 MinIO 文件会造成孤儿文件、浪费存储，故两者一起删。

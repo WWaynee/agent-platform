@@ -22,7 +22,7 @@ import (
 //     "components": {
 //       "mysql":    "up",
 //       "redis":    "down",
-//       "minio":    "up",
+//       "oss":      "up",
 //       ...
 //     },
 //     "errors": {                        // 仅 down 时存在，key=组件名
@@ -101,13 +101,14 @@ func CheckRedis(ctx context.Context) checkResult {
 	return checkResult{status: StatusUp}
 }
 
-// CheckMinIO 检查 MinIO：确认默认 bucket 存在（或能列出桶）。
+// CheckMinIO 检查对象存储（OSS，需求单 0010 后对接阿里云 OSS）：确认默认 bucket 存在。
+// 函数名沿用历史 CheckMinIO；组件展示名统一为 "oss"。
 func CheckMinIO(ctx context.Context) checkResult {
-	if storage.MinioClient == nil {
-		return checkResult{status: StatusDown, errMsg: "MinIO 未初始化"}
+	if storage.OSSClient == nil {
+		return checkResult{status: StatusDown, errMsg: "OSS 未初始化"}
 	}
-	bucket := config.GlobalConfig.MinIO.Bucket
-	exists, err := storage.MinioClient.BucketExists(ctx, bucket)
+	bucket := config.GlobalConfig.OSS.Bucket
+	exists, err := storage.OSSClient.IsBucketExist(ctx, bucket)
 	if err != nil {
 		return checkResult{status: StatusDown, errMsg: err.Error()}
 	}
@@ -155,7 +156,7 @@ func CheckAll() HealthReport {
 	results := map[string]checkResult{
 		"mysql":    CheckMySQL(ctx),
 		"redis":    CheckRedis(ctx),
-		"minio":    CheckMinIO(ctx),
+		"oss":      CheckMinIO(ctx),
 		"qdrant":   CheckQdrant(ctx),
 		"rabbitmq": CheckRabbitMQ(ctx),
 	}

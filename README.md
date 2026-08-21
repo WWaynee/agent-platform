@@ -561,7 +561,7 @@
 | 后端 | Go + Gin |
 | 数据库 | MySQL 8.0 + GORM |
 | 缓存 | Redis 7 |
-| 对象存储 | MinIO |
+| 对象存储 | 阿里云 OSS（原 MinIO，需求单 0010 迁移）|
 | 向量库 | Qdrant |
 | 消息队列 | RabbitMQ |
 | 监控 | Prometheus（observability/metrics.go，独立内网端口 /metrics，指标：HTTP/LLM/工具/MQ）|
@@ -585,6 +585,8 @@ go run cmd/migrate/main.go
 go run cmd/api/main.go        # API 服务（接请求、上传时投递 MQ 消息）
 go run cmd/worker/main.go     # Worker 独立进程（消费 document_parse 队列、执行异步解析，可多开扩容）
 ```
+
+> **对象存储（需求单 0010）**：文档对象存储使用**阿里云 OSS**（原 MinIO 已迁移）。需在 `.env` 配置 `OSS_REGION / OSS_ENDPOINT / OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET / OSS_BUCKET`（见 `.env.example`）。文档下载/预览走 OSS **预签名 URL 直链**（`GET /api/document/:id/url`）。
 
 服务启动后访问：
 - 健康检查（详细依赖状态）：`http://127.0.0.1:{HTTP_PORT}/health`（全部正常 200，任一依赖挂 503）
@@ -698,7 +700,7 @@ agent-platform/
 │   ├── redis.go               #   Redis 客户端初始化 InitRedis（含 Ping 连通性校验 + 全局 RDB）
 │   ├── mysql.go               #   MySQL 初始化（GORM）
 │   ├── db_logger.go           #   自定义 GORM Logger：从 ctx 提 trace_id/tenant_id，慢查询/错误落统一 JSON 日志
-│   ├── minio.go               #   MinIO SDK 封装 + 初始化：Upload/Download/GetURL/Delete
+│   ├── minio.go               #   对象存储封装（阿里云 OSS SDK，Upload/Download/PresignURL/Delete；原 MinIO 迁移）
 │   ├── qdrant.go              #   Qdrant 向量库封装：批量入库 UpsertVectors + 多租户检索 SearchVectors
 │   ├── model/models.go        #   GORM 模型（全核心表的实体定义）
 │   ├── tenant.go / user.go    #   租户 / 用户的数据库操作
