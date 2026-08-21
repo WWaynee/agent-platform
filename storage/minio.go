@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
@@ -61,21 +63,43 @@ func InitMinIO() error {
 // UploadFile 上传文件到默认 bucket（OSS PutObject）
 // objectKey: 对象在 bucket 内的存储路径（如 "documents/123/xxx.txt"）
 // reader:    文件内容流
-// size:      文件字节大小（本封装不强制，OSS 无需显式 size）
+// size:      文件字节大小（OSS 无需显式 size）
+// ContentType：按扩展名自动设置，使 txt/md 能以正确类型访问（review 建议）。
 func UploadFile(objectKey string, reader io.Reader, size int64) error {
 	if OSSClient == nil {
 		return fmt.Errorf("OSS 客户端未初始化")
 	}
 	ctx := context.Background()
+	contentType := contentTypeFor(objectKey)
 	_, err := OSSClient.PutObject(ctx, &oss.PutObjectRequest{
-		Bucket: oss.Ptr(getBucket()),
-		Key:    oss.Ptr(objectKey),
-		Body:   reader,
+		Bucket:      oss.Ptr(getBucket()),
+		Key:         oss.Ptr(objectKey),
+		Body:        reader,
+		ContentType: oss.Ptr(contentType),
 	})
 	if err != nil {
 		return fmt.Errorf("上传文件到 OSS 失败: %w", err)
 	}
 	return nil
+}
+
+// contentTypeFor 根据对象 key 的扩展名推断 ContentType（仅 .txt/.md 明确，其余默认二进制）。
+func contentTypeFor(objectKey string) string {
+	ext := strings.ToLower(path.Ext(objectKey))
+	switch ext {
+	case ".txt":
+		return "text/plain; charset=utf-8"
+	case ".md":
+		return "text/markdown; charset=utf-8"
+	case ".pdf":
+		return "application/pdf"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // DownloadFile 从 OSS 下载对象内容，返回其字节流（供向量化/读全文使用）。
@@ -116,24 +140,46 @@ func DeleteFile(objectKey string) error {
 	return nil
 }
 
-// GetFileURL 生成对象读写权限的预签名 URL（默认 1 小时）。
-// 别名 PresignURL(objectKey, time.Hour)；供文档下载/预览（签名 URL 直链）。
+// GetFileURL 生成对象预签名 URL（默认 1 小时，inline 预览语义）。
 func GetFileURL(objectKey string) (string, error) {
 	return PresignURL(objectKey, time.Hour)
 }
 
-// PresignURL 生成指定过期时长的预签名 Get URL，浏览器可直连 OSS 下载/预览。
-// objectKey: 对象存储路径；expiry: URL 有效期（如 1 小时，仅 support 到未来时间）。
+// PresignURL 生成指定过期时长的预签名 Get URL（inline 预览，浏览器直连 OSS 打开/预览）。
 func PresignURL(objectKey string, expiry time.Duration) (string, error) {
+	return presignObject(objectKey, expiry, "")
+}
+
+// PresignPreviewURL 生成预签名 URL（显式 inline，浏览器新页签预览）。
+func PresignPreviewURL(objectKey string, expiry time.Duration) (string, error) {
+	return presignObject(objectKey, expiry, "inline")
+}
+
+// PresignDownloadURL 生成预签名 URL（attachment 另存为，review 建议：跨域下载时强制保存）。
+// filename: 下载保存的文件名。
+func PresignDownloadURL(objectKey, filename string, expiry time.Duration) (string, error) {
+	disposition := "attachment"
+	if filename != "" {
+		disposition += "; filename=\"" + filename + "\""
+	}
+	return presignObject(objectKey, expiry, disposition)
+}
+
+// presignObject 生成 OSS 预签名 Get URL，可选 response-content-disposition。
+func presignObject(objectKey string, expiry time.Duration, disposition string) (string, error) {
 	if OSSClient == nil {
 		return "", fmt.Errorf("OSS 客户端未初始化")
 	}
 	ctx := context.Background()
 	expiration := time.Now().Add(expiry)
-	result, err := OSSClient.Presign(ctx, &oss.GetObjectRequest{
+	req := &oss.GetObjectRequest{
 		Bucket: oss.Ptr(getBucket()),
 		Key:    oss.Ptr(objectKey),
-	}, oss.PresignExpiration(expiration))
+	}
+	if disposition != "" {
+		req.ResponseContentDisposition = oss.Ptr(disposition)
+	}
+	result, err := OSSClient.Presign(ctx, req, oss.PresignExpiration(expiration))
 	if err != nil {
 		return "", fmt.Errorf("生成 OSS 签名 URL 失败: %w", err)
 	}

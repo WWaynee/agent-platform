@@ -102,21 +102,27 @@ func GetDocumentDetail(ctx context.Context, tenantID, id uint64) (*model.Documen
 	return doc, nil
 }
 
-// GetDocumentAccessURL 生成文档的 OSS 预签名访问 URL（下载/预览用，需求单 0010）。
-// 校验文档属于当前租户后，取其 objectKey 生成短时效（1 小时）签名 URL，浏览器可直连 OSS。
-func GetDocumentAccessURL(ctx context.Context, tenantID, id uint64) (url string, name string, err error) {
+// GetDocumentAccessURL 生成文档的 OSS 预签名访问 URL（预览 + 下载，需求单 0010）。
+// 校验文档属于当前租户后取 objectKey，生成短时效（1 小时）签名 URL：
+//   - url          预览用（inline，浏览器新页签打开）
+//   - download_url 下载用（attachment，浏览器另存为）
+func GetDocumentAccessURL(ctx context.Context, tenantID, id uint64) (previewURL, downloadURL, name string, err error) {
 	doc, err := storage.GetDocumentByID(ctx, tenantID, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", "", fmt.Errorf("文档不存在")
+			return "", "", "", fmt.Errorf("文档不存在")
 		}
-		return "", "", fmt.Errorf("查询文档失败: %w", err)
+		return "", "", "", fmt.Errorf("查询文档失败: %w", err)
 	}
-	u, err := storage.PresignURL(doc.MinioObjectKey, time.Hour)
+	pu, err := storage.PresignPreviewURL(doc.MinioObjectKey, time.Hour)
 	if err != nil {
-		return "", "", fmt.Errorf("生成文档访问链接失败: %w", err)
+		return "", "", "", fmt.Errorf("生成文档预览链接失败: %w", err)
 	}
-	return u, doc.Name, nil
+	du, err := storage.PresignDownloadURL(doc.MinioObjectKey, doc.Name, time.Hour)
+	if err != nil {
+		return "", "", "", fmt.Errorf("生成文档下载链接失败: %w", err)
+	}
+	return pu, du, doc.Name, nil
 }
 
 // ctx 携带请求级 trace_id/tenant_id，透传给 storage。

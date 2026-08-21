@@ -57,7 +57,7 @@ async function docAccessUrl(id) {
   return data; // { url, name }
 }
 
-// 预览：新页签打开签名 URL（txt/md 浏览器可直接文本预览）
+// 预览：新页签打开签名 URL（txt/md 浏览器可直接文本预览，inline）
 async function previewDocument(id) {
   try {
     const data = await docAccessUrl(id);
@@ -68,14 +68,13 @@ async function previewDocument(id) {
   }
 }
 
-// 下载：触发浏览器下载该文档
+// 下载：用 attachment 签名 URL 触发浏览器下载
 async function downloadDocument(id) {
   try {
     const data = await docAccessUrl(id);
-    if (!data || !data.url) { toast('下载链接生成失败', 'error'); return; }
+    if (!data || !data.download_url) { toast('下载链接生成失败', 'error'); return; }
     const a = document.createElement('a');
-    a.href = data.url;
-    a.download = data.name || '';
+    a.href = data.download_url;
     a.target = '_blank';
     document.body.appendChild(a);
     a.click();
