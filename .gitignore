@@ -32,3 +32,6 @@ data/
 tmp/
 temp/
 *.tmp
+
+# 本地测试文档（不入库）
+testdoc/
