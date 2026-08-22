@@ -617,7 +617,7 @@ open web/login.html   # 或 python3 -m http.server 后访问
 
 - **启动顺序**：先 `docker compose up -d` 拉起全部中间件，再跑 `migrate` 建表，最后启 `api`（如需要异步解析再加 `worker`）。
 - **重启不丢**：会话消息 / 用量 / 限流计数在 Redis；文档与元数据在 MySQL/MinIO，内存里没有业务状态，重启安全。
-- **可观测为结构化 JSON**：日志统一走 `observability` 输出 JSON（含 `trace_id/tenant_id/user_id/latency`），可按采集器直接接入。
+- **可观测为结构化 JSON**：日志统一走 `observability` 输出 JSON（含 `trace_id/tenant_id/user_id/latency`），可按采集器直接接入。配置 `LOG_FILE` 后可经 **lumberjack 按日切分文件并只保留最近 7 天**（需求单 0011，见 `.env.example`）。
 - **trace_id 贯穿**：HTTP 入口生成/透传，经 Agent/LLM/工具/存储，并随 MQ 消息带到消费端；排查问题先看 trace_id。
 - **日志别打敏感信息（红线）**：密码、`api_key`、token、用户隐私数据一律不落日志（脱敏或干脆不打），这是安全底线。
 - **指标标签要低基数**：只用 `method/status_code/model/tool_name/queue` 等枚举值，**绝不把 `user_id/trace_id/参数` 当标签**，否则 Prometheus 基数爆炸。

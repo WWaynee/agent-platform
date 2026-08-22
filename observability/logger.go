@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
 
 	"agent-platform/agent/interfaces"
 	"agent-platform/config"
@@ -185,12 +186,20 @@ func initWith(level zapcore.Level, out io.Writer, file string) func() {
 
 	core := zapcore.NewCore(jsonEncoder, zapcore.AddSync(out), level)
 
-	// 可选：配了 LOG_FILE 则用 Tee 再加一个文件输出核心（JSON，落盘归档/采集）
+	// 可选：配了 LOG_FILE 用 lumberjack 做按日切分 + 保留最近 N 天（需求单 0011）。
+	// lumberjack 负责滚动（按天/大小切分、只保留 MaxAge 天、旧文件自动清理），
+	// 避免"所有日志写进同一文件、无限增长"。stdout 仍保留（Tee）。
 	if file != "" {
-		if f, err := os.OpenFile(file, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
-			fileCore := zapcore.NewCore(zapcore.NewJSONEncoder(encoderCfg), zapcore.AddSync(f), level)
-			core = zapcore.NewTee(core, fileCore)
+		lj := &lumberjack.Logger{
+			Filename:   file, // 日志文件路径（滚动时会在同目录产生同名文件）
+			MaxSize:    100,  // 单个文件最大 100MB（切分的次要触发条件，MB）
+			MaxBackups: 7,    // 最多保留 7 个旧文件
+			MaxAge:     7,    // 只保留最近 7 天的日志
+			Compress:   false,
+			LocalTime:  true, // 用本地时间（文件名/切分按本地日）
 		}
+		fileCore := zapcore.NewCore(zapcore.NewJSONEncoder(encoderCfg), zapcore.AddSync(lj), level)
+		core = zapcore.NewTee(core, fileCore)
 	}
 
 	l := zap.New(core).WithOptions(zap.AddCaller())
